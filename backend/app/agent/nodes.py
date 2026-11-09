@@ -94,7 +94,9 @@ def route_after_triage(state: AgentState) -> str:
     triage = state.get("triage")
     if triage is None or not state.get("allow_draft", True):
         return "end"
-    return "draft" if (triage.needs_reply or triage.priority >= 3) else "end"
+    # Draft only when the owner personally should answer (not for high-priority notifications,
+    # e.g. an automated security alert: act on it, don't reply to it). Redraft can force one.
+    return "draft" if triage.needs_reply else "end"
 
 
 # ------------------------------------------------------------------------------ draft

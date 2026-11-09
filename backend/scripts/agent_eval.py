@@ -80,7 +80,7 @@ async def main(args: argparse.Namespace) -> int:
         f"{'tri in/out/rsn':>15} {'draft in/out/rsn':>17} {'total':>6}  summary"
     )
     passed, drafts_done, ran = 0, 0, 0
-    drafted: list[tuple[str, str]] = []
+    drafted: list[tuple[str, str, list[str]]] = []
     per_message: list[dict[str, int]] = []  # measured tokens per message (for the budget maths)
 
     def snap() -> tuple[int, ...]:
@@ -141,12 +141,15 @@ async def main(args: argparse.Namespace) -> int:
         draft = out.get("draft")
         if draft is not None:
             drafts_done += 1
-            drafted.append((sample["id"], draft.body))
+            drafted.append((sample["id"], draft.body, list(draft.open_questions)))
 
     if drafted:
         print("\n--- drafts")
-        for sid, body in drafted:
-            print(f"[{sid}]\n{body}\n")
+        for sid, body, questions in drafted:
+            print(f"[{sid}]\n{body}")
+            for q in questions:
+                print(f"  ? {q}")
+            print()
     u_t, u_d = triage_llm.usage, draft_llm.usage
     print(
         f"passed {passed}/{len(samples)} (ran {ran}); LLM calls {u_t.calls + u_d.calls} "

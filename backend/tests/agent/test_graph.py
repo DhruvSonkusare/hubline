@@ -51,11 +51,31 @@ async def test_low_priority_without_reply_gets_no_draft() -> None:
     assert d.calls == []
 
 
-async def test_priority_three_is_drafted_even_without_needs_reply() -> None:
+@pytest.mark.parametrize("priority", [3, 5])
+async def test_no_draft_without_needs_reply_even_at_high_priority(priority: int) -> None:
+    """E.g. an automated security alert: act on it, don't reply to it."""
     t, d = llms()
-    t.queue(TriageResult, triage(3, needs_reply=False))
+    t.queue(TriageResult, triage(priority, needs_reply=False))
+    out = await run_agent(build_graph(t, d), state())
+    assert out["draft"] is None
+    assert d.calls == []
+
+
+async def test_needs_reply_is_drafted_at_any_priority() -> None:
+    t, d = llms()
+    t.queue(TriageResult, triage(2, needs_reply=True))
     out = await run_agent(build_graph(t, d), state())
     assert out["draft"] is not None
+
+
+async def test_draft_prompt_asks_for_a_holding_reply_instead_of_invented_facts() -> None:
+    t, d = llms()
+    t.queue(TriageResult, triage(4))
+    await run_agent(build_graph(t, d), state())
+    system = d.calls[0].system
+    assert "HOLDING REPLY" in system
+    assert "open_questions" in system
+    assert "Never invent facts" in system
 
 
 async def test_allow_draft_false_skips_drafting() -> None:

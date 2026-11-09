@@ -9,6 +9,8 @@ The full approved plan is **[docs/PLAN.md](docs/PLAN.md)**. Its "Revisions" (R1โ
 > - Never add a paid service, plan, API or default.
 > - Never make paid API calls (e.g. Anthropic) without the user explicitly asking.
 
+> **GITHUB ON HOLD (R11):** commit locally only. Do not push, add a remote, or ask for a repo URL until the user says GitHub is back.
+
 ## Build process (MANDATORY)
 
 - We build in **6 steps** (plan ยง9). Work on **one step only**, the one the user asked for.
@@ -39,7 +41,7 @@ The full approved plan is **[docs/PLAN.md](docs/PLAN.md)**. Its "Revisions" (R1โ
   - **Production (Render Free):** the loops are **off**. Work runs only through `POST /internal/tick` (`X-Tick-Secret`; one scheduler pass + โค60s agent drain, called by the GitHub Actions cron every 30 min), `TICK_ON_STARTUP`, and on-demand kicks from API actions (`WorkRunner`, `app/workers/runner.py`).
   - **Never add anything that queries the DB periodically in production:** Neon Free (100 CU-h) must stay well under its limit.
   - **Scheduling times use the DB clock** (`func.now()`), never the app host's clock.
-- **Frontend:** Next.js App Router + TypeScript + Tailwind on Vercel (functions in `sin1`). Auth.js GitHub login with an allowlist. BFF pattern: the browser talks only to Next.js; the Next.js server calls the backend with `BACKEND_API_TOKEN`. No secrets in `NEXT_PUBLIC_*`.
+- **Frontend:** Next.js App Router + TypeScript + Tailwind on Vercel (functions in `sin1`). Auth.js login with providers chosen **by env vars only** (R12): a single-password Credentials provider (`DASHBOARD_PASSWORD`, constant-time compare) now; GitHub OAuth (`AUTH_PROVIDERS=github`) later, with no code change. BFF pattern: the browser talks only to Next.js; the Next.js server calls the backend with `BACKEND_API_TOKEN`. No secrets in `NEXT_PUBLIC_*`.
 - **Hosting ($0):** backend on **Render Free** (Singapore, 1 instance, 1 uvicorn worker; sleeps after 15 min idle, ~1 min cold start), frontend on **Vercel Hobby** (`sin1`), DB on **Neon Free** (Singapore, autoscaling max 0.25 CU). Slack webhooks that hit a sleeping instance rely on Slack's retries (immediately, +1 min, +5 min).
 - **Secrets:** environment variables only. Third-party tokens are encrypted with a single Fernet key (`CREDENTIALS_ENCRYPTION_KEY`, Step 5) and never returned by the API or logged.
 - **Repo:** `backend/` and `frontend/` in one public GitHub repo named `Hubline`. The product name in the UI is "Hubline".

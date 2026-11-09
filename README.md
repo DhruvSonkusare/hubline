@@ -37,7 +37,7 @@ App event ─► webhook / 60s poll ─► connector.fetch_new() ─► normalis
 - **The agent never sends.** It is a LangGraph graph with no tools, and it runs four steps:
   1. `prefilter`: rules that skip your own messages and give bulk no-reply mail priority 1 without an LLM call.
   2. `triage`: scores priority 1–5 and writes a one-line summary.
-  3. `draft`: writes a reply, only when one is needed or priority is 3 or higher.
+  3. `draft`: writes a reply only when the owner should personally answer (`needs_reply`). If a proper answer needs facts the agent does not have, it writes a holding reply and lists the missing facts as open questions.
   4. `validate_draft`: rejects placeholders and over-long drafts, with one retry that feeds the problem back.
 
   The worker loads context from the DB, runs the graph with no transaction open, then saves the priority, summary and a versioned draft.

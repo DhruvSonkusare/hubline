@@ -641,3 +641,73 @@ Other new tests:
 ## 8. Open questions
 1. **Draft rule:** change "draft when `needs_reply` OR priority ≥ 3" to "draft only when `needs_reply`"? That would have avoided the `security-alert` draft, and it saves ≈ 450 tokens per affected message.
 2. **Fixing invented facts:** add a stricter "no invented facts" line to the draft prompt, and a validator check that rejects bullet lists the incoming message didn't ask for? Or leave prompt tuning to a later step?
+
+---
+
+# Addendum 4 (2026-11-09): draft fixes, Groq eval re-run, environment
+
+**Status:** done and committed locally. **GitHub is on hold** (plan R11): nothing was pushed, and there's no remote.
+
+## Fixes
+1. **Drafts only when `needs_reply` is true.**
+   - **Rule:** `route_after_triage` no longer drafts for "priority ≥ 3"; Redraft can still force one. A high-priority notification (e.g. an automated security alert) is something to act on, not reply to.
+   - **Triage prompt (`triage-v3`):** now says that automated notifications, alerts, receipts and newsletters never need a reply, even when urgent. Urgency goes in the priority.
+2. **Holding reply plus `open_questions` instead of invented facts.** The draft prompt (`draft-v3`) now says the agent does not know the owner's projects, schedule or decisions. When a proper answer needs them, it writes a short holding reply (acknowledge, say the owner will follow up, no invented time) and puts each missing fact in `open_questions`.
+3. **Eval output:** each draft is now printed with its open questions.
+
+**Tests:**
+- no draft at P3/P5 without `needs_reply`
+- a draft at P2 with `needs_reply`
+- the draft prompt carries the holding-reply instruction
+- the prompt version is updated
+
+204 passed. Ruff, mypy strict and `alembic check` are green.
+
+## Groq eval re-run (`--provider groq --max-drafts 15`): 15/15 in band, $0
+| id | want | got | ok | triage in/out/rsn | draft in/out/rsn | total |
+|---|---|---|---|---|---|---|
+| prod-outage | 5 | 5 | ✔ | 563/117/39 | 541/149/26 | 1370 |
+| manager-today | 4-5 | 4 | ✔ | 530/151/57 | 516/95/11 | 1292 |
+| client-friday | 3-4 | 3 | ✔ | 552/159/73 | 534/100/10 | 1345 |
+| pr-review-week | 2-3 | 3 | ✔ | 527/122/39 | 500/118/72 | 1267 |
+| standup-move | 3-4 | 4 | ✔ | 529/125/42 | 508/131/50 | 1293 |
+| recruiter | 1-3 | 3 | ✔ | 1082/290/131 *(1 structured-output retry)* | 516/131/41 | 2019 |
+| friend-meetup | 2-3 | 3 | ✔ | 524/143/64 | 500/128/62 | 1295 |
+| newsletter | 1 | 1 | ✔ | rules (0 tokens) | – | 0 |
+| marketing | 1 | 1 | ✔ | 527/102/29 | – | 629 |
+| invoice | 1-2 | 2 | ✔ | 536/134/53 | – | 670 |
+| ci-failure-main | 2-4 | 3 | ✔ | 520/203/118 | – | 723 |
+| **security-alert** | 3-5 | 4 | ✔ | 545/147/69 | **– (no draft now)** | 692 |
+| fyi-docs | 1-2 | 2 | ✔ | 522/140/66 | – | 662 |
+| thanks | 1-2 | 2 | ✔ | 518/126/52 | – | 644 |
+| injection | 1-2 | 1 | ✔ | 530/144/77 | – | 674 |
+
+Totals: 22 LLM calls (15 triage, 7 drafts); 11,620 in / 2,955 out, of which 1,181 reasoning; **14,575 tokens**.
+
+| Measured tokens | Mean | Median | Max |
+|---|---|---|---|
+| Per message (all) | 1,041 | 1,267 | 2,019 |
+| Per message (drafted) | 1,412 | 1,295 | 2,019 |
+
+Draft rate: 7/14 (was 8/14). Prompts are about 35 tokens longer than in Addendum 3, because of the extra instructions.
+
+**What changed in the output:**
+- **`security-alert`:** P4, `needs_reply=false`, **no draft**. (Before: a draft replying to GitHub's automated notice.)
+- **`manager-today`:** before, it invented three status bullets. Now it gives a **holding reply**, *"Sure, I'll put together the three bullet points on the Hubline launch blockers and send them over before our 1:1 at 5 pm."*, with the open question *"What are the current blockers for the Hubline launch?"*
+- **`client-friday`:** a holding reply, with the open question *"What is the current webhook retry policy (number of retries and time period)…?"* No invented numbers.
+- **`friend-meetup`, `standup-move`:** holding replies ("I'll check my schedule and get back to you") with an availability question.
+- **Remaining quality nit:** some open questions are phrased *to the sender* instead of *to the owner*. For example, `prod-outage` has "Do you want me to proceed with a rollback?", and `recruiter` asks for Meera's times even though the draft already asks her. That's harmless (the owner sees them as prompts), but a later prompt tweak could say "questions for the owner, not for the sender".
+
+**Budget check with these numbers:** 180,000 / 1,041 ≈ **173 messages/day** at the mean, and 180,000 / 2,019 ≈ **89/day** in the worst case with a retry. That's still far above demo volume. The hourly cap of 30 and the per-minute limits are unchanged and fine (see Addendum 3).
+
+## Environment
+- **Node.js:** it was not installed. I installed it with `winget install OpenJS.NodeJS.LTS`, the command you gave. That package is now the **v26 LTS line** (it satisfies "Node 22 LTS or newer"). Confirmed in a new PowerShell process: **node v26.13.0, npm 11.20.0** (`C:\Program Files\nodejs`). Nothing else was installed.
+- **Neon production URL:** `docs/setup/deploy.md` (new) explains why production should use the **direct** endpoint (host without `-pooler`): one long-lived process with its own pool, asyncpg prepared statements, migrations on boot. It also covers how to copy it and how to check it with `verify_db`.
+
+## Plan changes
+- **R11, GitHub on hold:** commit locally only; GitHub OAuth, the Actions workflows and repo-based deploys wait.
+- **R12, dashboard login by password for now:**
+  - An Auth.js Credentials provider with `DASHBOARD_PASSWORD` (≥ 16 characters), compared in constant time, with the same JWT `httpOnly` cookie.
+  - The provider list comes from `AUTH_PROVIDERS` (`password` / `github` / `password,github`), so GitHub OAuth is switched on later by env vars only.
+  - Decision 7, §7, the frontend env vars and the Step 3 manual step are updated. CLAUDE.md is updated too.
+- **README:** the drafting rule is described.

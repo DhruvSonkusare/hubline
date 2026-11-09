@@ -112,7 +112,7 @@ def test_triage_prompt_guards_against_injection_and_escapes_tags() -> None:
     assert "Dhruv Sonkusare" in system
     assert "neha@acme.example" in system  # VIP list
     assert "Mon 09 Nov 12:00 IST" in user  # owner timezone (Asia/Kolkata)
-    assert PROMPT_VERSION == "triage-v2/draft-v2"
+    assert PROMPT_VERSION == "triage-v3/draft-v3"
 
 
 def test_draft_prompt_includes_thread_style_and_redraft_inputs() -> None:

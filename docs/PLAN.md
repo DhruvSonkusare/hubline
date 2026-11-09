@@ -18,6 +18,8 @@
 | R8 | **Free-tier rate limits are respected.** A client-side RPM/TPM pacer runs per model. A provider 429 **defers** the job by `retry-after`; it never fails it. A rolling 24h token budget is read from `agent_jobs` token columns (migration `0003`). Prompts are clipped so one message costs about 1–3K tokens. Budget arithmetic is in `reports/step-2-report.md`. |
 | R9 | **Render Free sleeps after 15 idle minutes, so production runs with no background loops.**<ul><li>An external free cron calls `POST /internal/tick` (header `X-Tick-Secret`) every 30 minutes. Each tick runs one scheduler pass and drains agent jobs for at most 60s.</li><li>The app also ticks once on boot (`TICK_ON_STARTUP`).</li><li>API actions (enable/sync a connector, generate a sample, later webhooks) kick one pass in the background (`WORK_ON_DEMAND`).</li><li>Slack events that hit a sleeping instance rely on Slack's retries (§8).</li></ul> |
 | R10 | **Neon Free** gives 100 CU-hours/month and suspends after 5 idle minutes. Idle sleeps default to 600s (above 300s). In production no loop queries the DB at all, so it sleeps between ticks. The estimate is about 47 CU-hours/month (§8), and it must stay well under 100. |
+| R11 | **GitHub on hold (temporary; the account is unavailable).** Commit locally only: no push, no remote, no repo URL until the user says so. These wait until GitHub is back: GitHub OAuth login, the GitHub Actions CI and tick workflows (present in the repo, but never run), and Render/Vercel deploys from the repo. |
+| R12 | **Dashboard login uses a password for now.** It is an Auth.js **Credentials** provider with a single password, `DASHBOARD_PASSWORD` in `frontend/.env.local`.<ul><li>The password is compared in constant time (SHA-256 of both values, then `crypto.timingSafeEqual`).</li><li>Sessions use the same stateless JWT and `httpOnly`, `Secure`, `SameSite=Lax` cookie.</li><li>`auth.ts` builds its provider list from env vars only: `AUTH_PROVIDERS=password` (default), `github` or `password,github`.</li><li>GitHub needs `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET` and `ALLOWED_GITHUB_LOGINS`. **Switching to GitHub OAuth later is an env-var change only**; no code changes.</li></ul> |
 
 ## Decisions (answers to the §12 questions)
 
@@ -29,7 +31,7 @@
 | 4 | **LLM (R7, R8):** Groq free tier, `LLM_PROVIDER=groq`, `LLM_MODEL=openai/gpt-oss-120b` for both triage and drafts, `reasoning_effort=low`.<ul><li>Gemini free tier is the alternative, for demo data only.</li><li>Budget guards: `AGENT_MAX_TOKENS_PER_DAY=180000` (90% of Groq's 200K TPD) and the per-minute pacer are the real limits. `AGENT_MAX_JOBS_PER_HOUR=30` only shapes bursts (Addendum 3).</li><li>Backfill auto-triages only the newest 10 per connector.</li><li>Jobs are claimed in priority order: dashboard actions, then live messages, then backfill.</li><li>The rule-based prefilter skips bulk mail, drafts happen only when needed, and the demo connector emits at most 3 messages an hour.</li><li>Cost: $0.</li></ul> |
 | 5 | **Hosting (R6, R9): Render Free, Singapore. No background loops**; work runs on a 30-minute GitHub Actions cron (`/internal/tick`), on startup, and on demand. There are no keep-alive pings, so Neon can sleep. Slack's retries cover webhooks that arrive during a cold start (§8). Cost: $0. |
 | 6 | Slack replies post as you (user token). You are admin of the demo workspace. |
-| 7 | Dashboard login is GitHub OAuth (Auth.js). |
+| 7 | Dashboard login: **password for now (R12)**, using an Auth.js Credentials provider with `DASHBOARD_PASSWORD`. GitHub OAuth is the eventual target, switched on by env vars only once GitHub is available (R11). |
 | 8 | **Docker Desktop is installed**, so local dev and tests use `docker compose` Postgres 16. A Neon `test` branch is the fallback if Docker is unavailable. |
 | 9 | Public GitHub repo named `Hubline`. The UI product name is **Hubline**. |
 | 10 | Gmail: inbox minus Promotions/Social, 48h backfill, reply to sender only. |
@@ -641,7 +643,7 @@ class AgentState(TypedDict):
 START → load_context → prefilter ─┬─(outbound/self/empty)────────────────→ persist(skipped) → END
                                   ├─(bulk/automated rule hit: priority 1)─→ persist ────────→ END
                                   ├─(job_kind=redraft)─→ draft
-                                  └─→ triage ─┬─(needs_reply or priority≥3)─→ draft → validate_draft ─┬─ ok ─→ persist → END
+                                  └─→ triage ─┬─(needs_reply)─→ draft → validate_draft ─┬─ ok ─→ persist → END
                                               └─ else ─→ persist → END                ↑               └─ fail (1 retry) ─┘
                                                                                      (2nd failure → persist triage only, agent_error="draft_invalid")
 ```
@@ -749,13 +751,21 @@ Browser ──(session cookie, same origin)──► Next.js on Vercel (server c
                                          FastAPI on Render Free ──► Neon / Slack / Google / Graph / Groq
 ```
 
-**Dashboard login:**
-- Auth.js (next-auth v5) with the **GitHub provider** and stateless JWT sessions (no DB adapter).
-- The `signIn` callback rejects anyone not in `ALLOWED_GITHUB_LOGINS`.
-- The cookie is `httpOnly`, `Secure` and `SameSite=Lax`, encrypted with `AUTH_SECRET`.
+**Dashboard login (R12):**
+- Auth.js (next-auth v5) with stateless **JWT sessions** (no DB adapter). The cookie is `httpOnly`, `Secure` (on HTTPS) and `SameSite=Lax`, encrypted with `AUTH_SECRET`.
+- **Providers come from env vars only** (`frontend/auth.ts` builds the list):
+
+  | `AUTH_PROVIDERS` | Provider | Needs |
+  |---|---|---|
+  | `password` (**default, now**) | Credentials, single password | `DASHBOARD_PASSWORD` (≥ 16 characters; the app refuses to start with a shorter one) |
+  | `github` (later, once GitHub is back) | GitHub OAuth | `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET`, `ALLOWED_GITHUB_LOGINS` (the `signIn` callback rejects anyone else) |
+  | `password,github` | both, during the switch-over | both sets |
+
+- **Password check:** `sha256(input)` and `sha256(DASHBOARD_PASSWORD)` are compared with `crypto.timingSafeEqual`. Hashing first gives equal-length buffers, so neither the content nor the length of the password leaks through timing.
+- **Failed logins:** a failure waits about 1 s and is rate-limited to 5 attempts per 15 minutes per IP. The limit is in memory, so it's best effort on Vercel's serverless instances; the long random password is the real protection.
+- **Session:** 7 days. The actor sent to the backend (`X-Actor`) is `password:owner`, or `github:<login>` with GitHub.
 - `proxy.ts` (the route guard) redirects unauthenticated requests to `/login`.
-- I chose GitHub OAuth over a password: there's no password to store or brute-force, setup takes 2 minutes, and it shows a familiar login on the demo.
-- Fallback if Auth.js maintenance is a concern when we get to Step 3: Better Auth with the same GitHub setup.
+- Fallback if Auth.js maintenance is a concern: Better Auth, with the same two providers.
 
 **Backend access:**
 - Only `lib/backend.ts` reads `BACKEND_URL` and `BACKEND_API_TOKEN`. It starts with `import "server-only"`, so the build fails if any client component imports it.
@@ -877,7 +887,7 @@ With 24/7 ticks (48/day) the total is ≈ 56. With hourly ticks it is ≈ 33. If
 | Slack | `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `SLACK_SIGNING_SECRET` |
 | Microsoft | `MS_CLIENT_ID`, `MS_CLIENT_SECRET`, `MS_TENANT` (`organizations` or a tenant id) |
 
-**Frontend (Vercel):** `AUTH_SECRET`, `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET`, `ALLOWED_GITHUB_LOGINS`, `BACKEND_URL`, `BACKEND_API_TOKEN`.
+**Frontend (Vercel / `frontend/.env.local`):** `AUTH_SECRET`, `AUTH_PROVIDERS` (`password` now), `DASHBOARD_PASSWORD`, `BACKEND_URL`, `BACKEND_API_TOKEN`. Later, for GitHub login (R12): `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET`, `ALLOWED_GITHUB_LOGINS`.
 
 `scripts/gen_keys.py` prints fresh values for the API token, the Fernet key and `AUTH_SECRET`.
 
@@ -892,7 +902,7 @@ With 24/7 ticks (48/day) the total is ≈ 56. With hourly ticks it is ≈ 33. If
 | Free cron | `API/internal/tick` (header `X-Tick-Secret`) | GitHub Actions secrets `TICK_URL`, `TICK_SECRET` |
 | Teams OAuth redirect | `API/oauth/teams/callback` | Entra ID app → Authentication (Web) |
 | Teams notificationUrl / lifecycleNotificationUrl | `API/webhooks/teams`, `API/webhooks/teams/lifecycle` | set by our code when it creates the Graph subscription |
-| Dashboard login callback | `WEB/api/auth/callback/github` (+ `http://localhost:3000/api/auth/callback/github` in a separate dev OAuth app) | GitHub → OAuth Apps |
+| Dashboard login callback (only once GitHub login is switched on, R12) | `WEB/api/auth/callback/github` (+ `http://localhost:3000/api/auth/callback/github` in a separate dev OAuth app) | GitHub → OAuth Apps |
 
 **Local webhooks:** Slack and Teams need public HTTPS. For local work use `cloudflared tunnel --url http://localhost:8000`. Otherwise do Slack integration testing against the deployed backend. I recommend a **separate "Hubline Dev" Slack app** so the production Request URL never has to change.
 
@@ -959,7 +969,7 @@ Then I stop and wait for you.
   - Read-only sources show "Copy draft" instead of Send.
   - The feed auto-refreshes every 15s while the tab is visible.
   - All backend and frontend checks are green.
-- **You set up by hand:** a GitHub OAuth App ("Hubline Dev", callback `http://localhost:3000/api/auth/callback/github`).
+- **You set up by hand:** `frontend/.env.local` with `DASHBOARD_PASSWORD` (≥ 16 random characters), `AUTH_SECRET`, `BACKEND_URL`, `BACKEND_API_TOKEN` (R12; no GitHub OAuth App while GitHub is on hold). The detailed Step 3 plan is in `reports/step-3-plan.md`.
 
 ### Step 4 — Deploy the whole thing at $0 (demo data only)
 - **Goal:** a live, login-protected demo on **Vercel Hobby + Render Free + Neon Free (`main`)**, with the **GitHub Actions tick cron**, before any real accounts are connected. This proves the free deploy path and gives the public HTTPS URL that Step 5's webhooks need.
@@ -1071,7 +1081,7 @@ E2E auth: Playwright uses an Auth.js Credentials provider that is **only compile
    - the dashboard is **login-only**
    - for presenting, use **dedicated demo accounts**: a fresh Gmail address and a free Slack workspace that you message from a second account
    - optionally, a guest view that only shows `is_demo` rows (question in §12)
-2. **Drafting every message wastes tokens and clutters the UI.** Drafts are written only when `needs_reply` or priority ≥3, plus on demand via Redraft.
+2. **Drafting every message wastes tokens and clutters the UI.** Drafts are written only when `needs_reply` is true (not for high-priority notifications such as automated alerts), plus on demand via Redraft. When the agent lacks the facts needed to answer, the draft is a holding reply and the missing facts go to `open_questions`, shown next to the draft (Addendum 4).
 3. **The contract needs small extensions** (§4): an opaque cursor, a `ReplyContext` for `send()`, an OAuth mixin and `maintain()`.
 4. **Sending is at-most-once, never retried automatically.** If a send fails, you retry it yourself. A crash mid-send leaves the reply as `unknown`, with a "check in the app" banner. I prefer this to the risk of sending the same reply twice.
 5. **Gmail uses polling, not push.** Push needs a Pub/Sub topic, IAM and a watch renewed every 7 days. Polling at 60s meets the brief with far less setup. Push stays an optional later addition behind `/webhooks/gmail`.

@@ -7,8 +7,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.agent.state import AgentState, MessageForAgent, OwnerProfile, ThreadItem
 
-TRIAGE_VERSION = "triage-v2"
-DRAFT_VERSION = "draft-v2"
+TRIAGE_VERSION = "triage-v3"
+DRAFT_VERSION = "draft-v3"
 PROMPT_VERSION = f"{TRIAGE_VERSION}/{DRAFT_VERSION}"
 PREVIOUS_DRAFT_CHARS = 1500  # keep redraft prompts within the per-message token budget
 
@@ -76,7 +76,9 @@ def triage_prompt(state: AgentState) -> tuple[str, str]:
             _PRIORITY_RUBRIC,
             "Summary: one line, at most 160 characters, in the form "
             "'<sender>: <what they want> (<deadline if any>)'. No filler words.",
-            "needs_reply is true only if the owner personally should answer.",
+            "needs_reply is true only if a person is waiting for the owner's personal answer. "
+            "Automated notifications, alerts, receipts and newsletters never need a reply, even "
+            "when they are urgent (urgency goes in the priority, not in needs_reply).",
             _INJECTION_GUARD + " Your only job is to classify.",
         ]
     )
@@ -97,8 +99,12 @@ def draft_prompt(state: AgentState) -> tuple[str, str]:
         [
             f"You draft replies on behalf of {owner.name} ({owner.context}), written as them.",
             style,
-            "Never invent facts, dates, numbers or commitments. If the reply needs information "
-            "only the owner has, write around it and list what is missing in open_questions. "
+            "Never invent facts, status updates, dates, numbers, names or commitments. You do "
+            "NOT know the owner's projects, schedule or decisions. If a proper answer needs any "
+            "of that (e.g. 'what is blocking X', 'are you free Saturday', 'how many retries'), "
+            "write a short HOLDING REPLY instead: acknowledge the request and say the owner will "
+            "follow up (no specific time unless the message gives one). Then put each missing "
+            "fact as a short question in open_questions, so the owner can complete the reply. "
             "Never put placeholders like [date] or {{name}} in the body.",
             f"Keep the body under {m.max_reply_chars} characters. Reply in the same language as "
             "the incoming message.",
