@@ -12,13 +12,13 @@ One inbox for every alert. Hubline pulls messages from Gmail, Slack, Microsoft T
 | LLM | Groq free tier (Gemini free tier optional) |
 | Cron | GitHub Actions on this public repo |
 
-> **Status: Step 2 of 6 complete (agent worker).** The backend runs locally. It has the connector framework, a demo connector, the polling scheduler, ingest with dedup, a LangGraph agent that scores, summarises and drafts every new message, and the messages and connectors API. The dashboard, deployment and real connectors arrive in Steps 3–6. See [docs/PLAN.md](docs/PLAN.md).
+> **Status: Step 3 of 6 complete (dashboard, local).** The backend and the Next.js dashboard run locally. You log in with a password, see a prioritised feed, create demo messages, and review the agent's summary, draft and open questions. You can approve and send (into a demo outbox), copy, redraft, dismiss or triage. Deployment and real connectors arrive in Steps 4–6. See [docs/PLAN.md](docs/PLAN.md) and the [screenshots](reports/step-3-screenshots/).
 
 | Step | What it adds | Status |
 |---|---|---|
 | 1 | Schema, ingest + dedup, connector framework, demo connector, scheduler, base API | ✅ done |
 | 2 | LangGraph agent worker: priority, summary, drafts | ✅ done |
-| 3 | Full API + Next.js dashboard (local) | ⏳ |
+| 3 | Full API + Next.js dashboard (local) | ✅ done |
 | 4 | Deploy at $0: Vercel Hobby + Render Free + Neon Free (Singapore) + tick cron | ⏳ |
 | 5 | Slack + Gmail live | ⏳ |
 | 6 | Teams, LinkedIn/X (read-only), hardening, demo script | ⏳ |
@@ -59,7 +59,7 @@ App event ─► webhook / 60s poll ─► connector.fetch_new() ─► normalis
 
 ## Local quickstart
 
-**Prerequisites:** Python 3.12, [uv](https://docs.astral.sh/uv/), Docker Desktop. Node 20+ is needed from Step 3.
+**Prerequisites:** Python 3.12, [uv](https://docs.astral.sh/uv/), Docker Desktop, Node.js 26.x (the frontend pins `26.x`, Vercel's default).
 
 ```bash
 # 1. Database (Postgres 16 on localhost:5433; also creates the hubline_test DB)
@@ -96,6 +96,32 @@ curl -H "Authorization: Bearer $TOKEN" "localhost:8000/api/messages?sort=priorit
 uv run python -m scripts.show_feed     # same, plus the current draft text
 ```
 
+### Dashboard (Next.js)
+
+```bash
+cd frontend
+npm install
+cp .env.example .env.local   # set DASHBOARD_PASSWORD (16+ chars), AUTH_SECRET, BACKEND_API_TOKEN
+npm run dev                  # http://localhost:3000, with the backend running on :8000
+```
+
+- **Login:** a single password (`DASHBOARD_PASSWORD`, constant-time check, `httpOnly` session cookie). GitHub OAuth can be switched on later with env vars only (`AUTH_PROVIDERS=github`, plan R12).
+- **Feed:**
+  - filters for app, priority, status and sort
+  - priority shown by colour and P-label
+  - DEMO badges
+  - auto-refresh every 15 s while visible (3 s while the agent works), pausing after 10 idle minutes, plus a manual Refresh
+  - the **New demo message** split button, which takes a scenario
+  - **Triage** on skipped or failed messages
+- **Detail:**
+  - the thread and the agent's summary and reason
+  - an editable draft with versions, with **open questions beside it**
+  - **Approve and send:** the confirmation names the destination, lists unticked open questions, and sends at most once
+  - **Copy draft** for read-only apps, **Redraft** with instructions, and **Dismiss/Reopen**
+  - a failed send shows its error and keeps the edited draft
+- **Waking-up state:** if the backend is asleep (Render Free), every page shows "Waking the backend…" and continues by itself.
+- **Secrets:** only the Next.js server talks to the backend (`lib/backend.ts` is server-only). The browser never sees `BACKEND_API_TOKEN`.
+
 ### Using a real (free) model
 
 1. Get a free key and put it in `backend/.env`:
@@ -123,6 +149,10 @@ cd backend
 uv run pytest            # needs `docker compose up -d db` (uses the hubline_test database)
 uv run pytest -m "not db"  # pure unit tests only, no database
 uv run ruff check . && uv run ruff format --check . && uv run mypy
+
+cd ../frontend
+npm run lint && npm run typecheck && npm test && npm run build
+npm run e2e    # Playwright: login -> new demo message -> approve, + 1440x900 screenshots
 ```
 
 - Database tests use **real Postgres**, because SKIP LOCKED, ON CONFLICT and partial indexes are Postgres-specific.
@@ -131,7 +161,7 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy
 
 To check another database end to end (for example the Neon dev branch), run `uv run python -m scripts.verify_db --var NEON_DEV_DATABASE_URL`. It applies migrations, compares the schema with the models, boots the app against it and calls `/readyz`. It prints the host only, never the URL.
 
-## API (Step 1)
+## API
 
 All `/api/*` routes need `Authorization: Bearer <BACKEND_API_TOKENS entry>`. Only the Next.js server calls them; the browser never does. Errors always look like `{"error": {"code", "message", "details"}}`.
 
@@ -143,6 +173,13 @@ All `/api/*` routes need `Authorization: Bearer <BACKEND_API_TOKENS entry>`. Onl
 | GET | `/api/connectors` | Every registered connector with status, sync state and settings schema. |
 | PATCH | `/api/connectors/{key}` | `{"enabled": bool, "settings": {...}}`. Settings are merged and validated. |
 | POST | `/api/connectors/{key}/sync` | Poll this connector now (202). |
+| GET | `/api/messages/stats` | Open counts per app and priority, and agent jobs in progress (sidebar). |
+| GET | `/api/messages/{id}` | Detail: the thread (including your replies), the current draft with `open_questions`, `draft_versions`, replies, and `can_send`. |
+| PUT | `/api/messages/{id}/draft` | Save your edit as a new draft version (no-op if unchanged). |
+| POST | `/api/messages/{id}/approve` | `{body, idempotency_key}`. Sends through the message's own app, at most once. A failure returns 502 and keeps the draft. Read-only apps return 409. |
+| POST | `/api/messages/{id}/triage` / `redraft` | Run the agent now at dashboard priority (`redraft` takes `{instructions}`). 409 if a job is already active. |
+| POST | `/api/messages/{id}/dismiss` / `reopen` | Status changes. |
+| GET | `/api/connectors/{key}/scenarios` | Scenario names for New demo message. |
 | POST | `/api/connectors/{key}/sample` | Generate one message now. Only for connectors with the `sample` capability, i.e. demo. Optional body `{"scenario": "<name>"}`. The agent triages it within seconds. |
 | POST | `/internal/tick` | **Cron endpoint**, header `X-Tick-Secret: $TICK_SECRET`. Runs one scheduler pass, then drains agent jobs for at most `TICK_BUDGET_S` (60s). `?wait=true` returns `{polled, agent_jobs, elapsed_s, stopped}`; otherwise it answers `202` and runs in the background. Returns 404 unless `TICK_SECRET` is set. |
 
@@ -185,7 +222,7 @@ Every setting is an environment variable. Locally they live in `backend/.env`; s
 
 ```
 backend/    FastAPI app, connectors, workers, Alembic migrations, tests (uv project)
-frontend/   Next.js dashboard (Step 3)
+frontend/   Next.js dashboard (App Router, Tailwind, Auth.js; Playwright e2e)
 docs/       PLAN.md (approved plan), setup guides (Steps 4–6)
 reports/    step-<N>-report.md after every build step
 ```

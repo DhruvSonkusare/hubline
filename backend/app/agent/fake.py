@@ -125,8 +125,21 @@ def _vips(system: str) -> list[str]:
     return [v.strip().lower() for v in m.group(1).split(",")]
 
 
+def _open_questions(body: str) -> list[str]:
+    """Like the real prompt: a holding reply + a checklist item for the OWNER (never a question
+    to the sender) when the message asks for something only the owner knows."""
+    if not _ASK.search(body):
+        return []
+    ask = next((s.strip() for s in re.split(r"(?<=[.!?:;])\s+", body) if "?" in s), "")
+    topic = ask.rstrip("?").strip() or "the request"
+    topic = topic[:1].upper() + topic[1:]
+    if len(topic) > 70:
+        topic = topic[:69].rstrip() + "…"
+    return [f"Your answer to: “{topic}” (needed for the reply)"]
+
+
 def _heuristic_draft(system: str, prompt: str) -> DraftResult:
-    sender, subject, _ = _parts(prompt)
+    sender, subject, body_text = _parts(prompt)
     first = _name(sender).split()[0] if _name(sender) else "there"
     owner_first = re.search(r"on behalf of (\S+)", system) or re.search(r"(\S+)", "Me")
     owner = owner_first.group(1) if owner_first else "Me"
@@ -141,4 +154,4 @@ def _heuristic_draft(system: str, prompt: str) -> DraftResult:
     else:
         body = f"Thanks {first}, on it. I'll get back to you shortly.{note}"
         tone = "casual"
-    return DraftResult(body=body, tone=tone, open_questions=[])
+    return DraftResult(body=body, tone=tone, open_questions=_open_questions(body_text))

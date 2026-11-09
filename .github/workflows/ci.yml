@@ -34,4 +34,29 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy
       - run: uv run pytest
-  # frontend job is added in Step 3
+
+  frontend:
+    # Not run yet: GitHub is on hold (plan R11). Same commands as locally.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      # build-time placeholders only (auth.ts validates these at import); never real secrets
+      DASHBOARD_PASSWORD: ci-placeholder-password-0123456789
+      AUTH_SECRET: ci-placeholder-auth-secret-0123456789
+      AUTH_PROVIDERS: password
+      BACKEND_URL: http://127.0.0.1:8000
+      BACKEND_API_TOKEN: ci-placeholder-token
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build

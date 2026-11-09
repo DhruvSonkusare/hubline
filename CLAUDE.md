@@ -77,7 +77,18 @@ uv run alembic upgrade head
 uv run uvicorn app.main:create_app --factory --reload --port 8000
 uv run pytest                                  # all tests (real Postgres, no external APIs)
 uv run ruff check . && uv run ruff format --check . && uv run mypy   # strict mypy on app/
+
+cd ../frontend                                 # Node 26.x
+npm run dev                                    # :3000, needs frontend/.env.local
+npm run lint && npm run typecheck && npm test && npm run build
+npm run e2e                                    # Playwright smoke + screenshots (db hubline_e2e)
 ```
+
+Frontend rules:
+- **Read `frontend/node_modules/next/dist/docs/` before using a Next.js API.** Next 16 differs from older versions: `proxy.ts` replaces middleware, and params/searchParams are Promises.
+- Cache Components stays off.
+- Only server code calls the backend.
+- Mutations go through server actions that re-check the session.
 
 ## Code conventions
 
