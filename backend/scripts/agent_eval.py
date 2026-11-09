@@ -23,6 +23,7 @@ import yaml
 
 from app.agent.graph import build_graph, run_agent
 from app.agent.llm import LLMRateLimitError, build_llm
+from app.agent.schemas import is_sender_directed
 from app.agent.state import MessageForAgent, OwnerProfile, initial_state
 from app.config import Settings
 
@@ -143,13 +144,19 @@ async def main(args: argparse.Namespace) -> int:
             drafts_done += 1
             drafted.append((sample["id"], draft.body, list(draft.open_questions)))
 
+    all_questions = [q for _, _, qs in drafted for q in qs]
+    bad_questions = [q for q in all_questions if is_sender_directed(q)]
     if drafted:
-        print("\n--- drafts")
+        print("\n--- drafts  (? = open question for you; ✗ = wrongly addressed to the sender)")
         for sid, body, questions in drafted:
             print(f"[{sid}]\n{body}")
             for q in questions:
-                print(f"  ? {q}")
+                print(f"  {'✗' if is_sender_directed(q) else '?'} {q}")
             print()
+    print(
+        f"open-question check: {len(all_questions) - len(bad_questions)}/{len(all_questions)} "
+        f"written as items for the approver ({len(bad_questions)} addressed to the sender)"
+    )
     u_t, u_d = triage_llm.usage, draft_llm.usage
     print(
         f"passed {passed}/{len(samples)} (ran {ran}); LLM calls {u_t.calls + u_d.calls} "
@@ -158,7 +165,7 @@ async def main(args: argparse.Namespace) -> int:
         f"{u_t.reasoning_tokens + u_d.reasoning_tokens}) total {used()}; cost $0 (free tier)"
     )
     print_token_stats(per_message)
-    return 0 if passed >= args.min_pass else 1
+    return 0 if passed >= args.min_pass and not bad_questions else 1
 
 
 def print_token_stats(rows: list[dict[str, int]]) -> None:

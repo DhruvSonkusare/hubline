@@ -19,6 +19,7 @@ from app.schemas.connectors import (
     ConnectorPatch,
     SampleIn,
     SampleOut,
+    ScenarioList,
     SyncScheduled,
 )
 from app.services.connector_runtime import allowed_by_env, build_connector, missing_settings
@@ -209,3 +210,15 @@ async def create_sample_message(
         external_id=message.external_id,
         agent_job_enqueued=result.jobs_enqueued > 0,
     )
+
+
+@router.get("/{key}/scenarios", response_model=ScenarioList, responses=_ERRORS)
+async def list_scenarios(key: str) -> ScenarioList:
+    """Scenario names for the New demo message menu (connectors with the sample capability)."""
+    try:
+        cls = registry.get(key)
+    except registry.UnknownConnectorError:
+        raise not_found("Connector") from None
+    if Capability.SAMPLE not in cls.describe().capabilities:
+        raise ApiError(409, "not_supported", f"{key} cannot generate sample messages")
+    return ScenarioList(scenarios=cls.sample_scenarios())

@@ -22,8 +22,8 @@ async def test_list_connectors(app_client: httpx.AsyncClient) -> None:
     assert demo["is_demo"] is True
     assert demo["enabled"] is False
     assert demo["status"] == "connected"
-    assert demo["capabilities"] == ["poll", "sample"]
-    assert demo["can_send"] is False
+    assert demo["capabilities"] == ["poll", "sample", "send"]
+    assert demo["can_send"] is True  # demo outbox
     assert demo["settings_schema"]["properties"]["emit_every_minutes"]["default"] == 20
     assert demo["missing_env"] == []
 

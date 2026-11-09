@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.agent.state import AgentState, MessageForAgent, OwnerProfile, ThreadItem
 
 TRIAGE_VERSION = "triage-v3"
-DRAFT_VERSION = "draft-v3"
+DRAFT_VERSION = "draft-v4"
 PROMPT_VERSION = f"{TRIAGE_VERSION}/{DRAFT_VERSION}"
 PREVIOUS_DRAFT_CHARS = 1500  # keep redraft prompts within the per-message token budget
 
@@ -103,8 +103,13 @@ def draft_prompt(state: AgentState) -> tuple[str, str]:
             "NOT know the owner's projects, schedule or decisions. If a proper answer needs any "
             "of that (e.g. 'what is blocking X', 'are you free Saturday', 'how many retries'), "
             "write a short HOLDING REPLY instead: acknowledge the request and say the owner will "
-            "follow up (no specific time unless the message gives one). Then put each missing "
-            "fact as a short question in open_questions, so the owner can complete the reply. "
+            "follow up (no specific time unless the message gives one). Then list each missing "
+            "fact in open_questions. open_questions are a checklist for the OWNER (the person "
+            "who approves the reply), never questions to the sender: name the item the owner "
+            "must supply, e.g. 'Your current launch blockers (needed for the reply)', 'Whether "
+            "you can attend on Saturday', 'The webhook retry count and window'. Never write "
+            "them as 'Do you…', 'Can you…' or 'Could you…' questions to the sender; anything "
+            "you want to ask the sender belongs in the reply body. "
             "Never put placeholders like [date] or {{name}} in the body.",
             f"Keep the body under {m.max_reply_chars} characters. Reply in the same language as "
             "the incoming message.",

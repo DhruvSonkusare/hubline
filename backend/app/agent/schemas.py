@@ -3,6 +3,7 @@ parsing (not in the JSON schema), so a slightly long summary is trimmed instead 
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -36,7 +37,11 @@ class DraftResult(BaseModel):
     tone: Literal["formal", "neutral", "casual"]
     open_questions: list[str] = Field(
         default_factory=list,
-        description="Facts only the owner can supply; never put placeholders in the body",
+        description=(
+            "Checklist for the owner who approves the reply: each item names a fact the owner "
+            "must supply, e.g. 'Your current blockers (needed for the reply)'. Never a "
+            "question to the sender."
+        ),
     )
 
 
@@ -57,3 +62,19 @@ def normalize_triage(t: TriageResult) -> TriageResult:
 def normalize_draft(d: DraftResult) -> DraftResult:
     questions = [q.strip() for q in d.open_questions if q.strip()][:MAX_OPEN_QUESTIONS]
     return d.model_copy(update={"body": d.body.strip(), "open_questions": questions})
+
+
+# "Do you want me to roll back?", "Could you share the logs?" - addressed to the sender,
+# which open_questions must never be (they are a checklist for the approving owner).
+_SENDER_DIRECTED = re.compile(
+    r"^\s*(do|did|does|can|could|would|will|are|is|should|shall|may|have|has)\s+(you|we)\b"
+    r"|\b(do|would) you (want|like|prefer)\b"
+    r"|\bplease (share|send|confirm|let me know)\b",
+    re.IGNORECASE,
+)
+
+
+def is_sender_directed(question: str) -> bool:
+    """True when an open question is phrased TO THE SENDER instead of as an item for the owner
+    (used by scripts/agent_eval.py as a quality check)."""
+    return bool(_SENDER_DIRECTED.search(question))

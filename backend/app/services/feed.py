@@ -7,6 +7,7 @@ sort=priority: ORDER BY COALESCE(priority, 0) DESC, received_at DESC, id DESC
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Sequence
 from typing import Any
 
@@ -14,18 +15,25 @@ from sqlalchemy import and_, exists, func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.connectors import registry
-from app.errors import ApiError
-from app.models import Draft, Message, Thread
+from app.errors import ApiError, not_found
+from app.models import Draft, Message, OutboundReply, Thread
 from app.schemas.common import decode_cursor, encode_cursor
 from app.schemas.messages import (
     PREVIEW_CHARS,
     AgentStatus,
+    DraftOut,
+    MessageDetail,
     MessagePage,
+    MessageStats,
     MessageSummary,
+    ReplyOut,
     SenderOut,
     SortOrder,
     StatusFilter,
+    ThreadItemOut,
 )
+
+THREAD_LIMIT = 20
 
 
 def _display_name(source: str) -> str:
@@ -122,3 +130,119 @@ async def list_messages(
             last.received_at, last.id, (last.priority or 0) if sort == "priority" else None
         )
     return MessagePage(items=items, next_cursor=next_cursor)
+
+
+async def get_message_detail(session: AsyncSession, message_id: uuid.UUID) -> MessageDetail:
+    row = (
+        await session.execute(
+            select(Message, Thread.title)
+            .join(Thread, Thread.id == Message.thread_id)
+            .where(Message.id == message_id, Message.direction == "inbound")
+        )
+    ).first()
+    if row is None:
+        raise not_found("Message")
+    m, title = row
+    drafts = list(
+        (
+            await session.execute(
+                select(Draft).where(Draft.message_id == m.id).order_by(Draft.version.desc())
+            )
+        ).scalars()
+    )
+    thread = list(
+        (
+            await session.execute(
+                select(Message)
+                .where(Message.thread_id == m.thread_id)
+                .order_by(Message.received_at.desc(), Message.id.desc())
+                .limit(THREAD_LIMIT)
+            )
+        ).scalars()
+    )
+    replies = list(
+        (
+            await session.execute(
+                select(OutboundReply)
+                .where(OutboundReply.message_id == m.id)
+                .order_by(OutboundReply.created_at.desc())
+            )
+        ).scalars()
+    )
+    try:
+        can_send = registry.get(m.source).describe().can_send
+    except registry.UnknownConnectorError:
+        can_send = False
+    current = drafts[0] if drafts else None
+    return MessageDetail(
+        id=m.id,
+        source=m.source,
+        source_display=_display_name(m.source),
+        is_demo=m.is_demo,
+        sender=SenderOut(id=m.sender_id, name=m.sender_name),
+        subject=m.subject,
+        thread_title=title,
+        preview=_preview(m.body),
+        received_at=m.received_at,
+        status=m.status,
+        thread_id=m.thread_id,
+        priority=m.priority,
+        summary=m.summary,
+        needs_reply=m.needs_reply,
+        category=m.category,
+        agent_status=m.agent_status,
+        agent_error=m.agent_error,
+        has_draft=current is not None,
+        body=m.body,
+        permalink=m.permalink,
+        priority_reason=m.priority_reason,
+        agent_model=m.agent_model,
+        prompt_version=m.prompt_version,
+        triaged_at=m.triaged_at,
+        can_send=can_send,
+        draft=DraftOut.model_validate(current, from_attributes=True) if current else None,
+        draft_versions=len(drafts),
+        thread=[
+            ThreadItemOut(
+                id=t.id,
+                direction=t.direction,
+                sender=SenderOut(id=t.sender_id, name=t.sender_name),
+                body=t.body,
+                received_at=t.received_at,
+            )
+            for t in reversed(thread)
+        ],
+        replies=[ReplyOut.model_validate(r, from_attributes=True) for r in replies],
+    )
+
+
+async def message_stats(session: AsyncSession) -> MessageStats:
+    open_inbound = and_(Message.direction == "inbound", Message.status == "open")
+    by_source = dict(
+        (
+            await session.execute(
+                select(Message.source, func.count()).where(open_inbound).group_by(Message.source)
+            )
+        ).all()
+    )
+    by_priority_rows = (
+        await session.execute(
+            select(Message.priority, func.count()).where(open_inbound).group_by(Message.priority)
+        )
+    ).all()
+    active = (
+        await session.execute(
+            select(func.count()).where(
+                Message.direction == "inbound",
+                Message.agent_status.in_(("pending", "running")),
+            )
+        )
+    ).scalar_one()
+    return MessageStats(
+        open_by_source={str(k): int(v) for k, v in by_source.items()},
+        open_by_priority={
+            (str(p) if p is not None else "unscored"): int(c) for p, c in by_priority_rows
+        },
+        agent_active=int(active),
+        total_open=int(sum(by_source.values())),
+    )

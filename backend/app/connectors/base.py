@@ -114,6 +114,11 @@ class Connector(ABC):
         """Verify the request signature FIRST (raise WebhookVerificationError), then parse."""
         raise NotImplementedError(f"{self.describe().key} does not accept webhooks")
 
+    @classmethod
+    def sample_scenarios(cls) -> list[str]:
+        """Scenario names accepted by sample() (Capability.SAMPLE); [] = random only."""
+        return []
+
     async def sample(self, scenario: str | None = None) -> NormalizedMessage:
         """Generate one fresh message now (Capability.SAMPLE). Raise ValueError for a bad
         scenario name."""

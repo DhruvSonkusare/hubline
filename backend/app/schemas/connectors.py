@@ -50,3 +50,7 @@ class SampleOut(BaseModel):
     message_id: uuid.UUID
     external_id: str
     agent_job_enqueued: bool
+
+
+class ScenarioList(BaseModel):
+    scenarios: list[str]

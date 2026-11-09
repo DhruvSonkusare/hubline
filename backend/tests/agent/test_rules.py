@@ -112,7 +112,7 @@ def test_triage_prompt_guards_against_injection_and_escapes_tags() -> None:
     assert "Dhruv Sonkusare" in system
     assert "neha@acme.example" in system  # VIP list
     assert "Mon 09 Nov 12:00 IST" in user  # owner timezone (Asia/Kolkata)
-    assert PROMPT_VERSION == "triage-v3/draft-v3"
+    assert PROMPT_VERSION == "triage-v3/draft-v4"
 
 
 def test_draft_prompt_includes_thread_style_and_redraft_inputs() -> None:
@@ -136,3 +136,29 @@ def test_draft_prompt_includes_thread_style_and_redraft_inputs() -> None:
 
     chat_system, _ = draft_prompt(state(subject=None, source_display="Slack"))
     assert "chat message" in chat_system
+
+
+@pytest.mark.parametrize(
+    ("question", "sender_directed"),
+    [
+        ("Do you want me to proceed with a rollback of the checkout API?", True),
+        ("Could you share the logs?", True),
+        ("Are you available on Saturday?", True),
+        ("Would you like a call?", True),
+        ("Please confirm the time", True),
+        ("Your current launch blockers (needed for the reply)", False),
+        ("Whether you can attend on Saturday", False),
+        ("The webhook retry count and window", False),
+        ("Rollback or hotfix decision", False),
+    ],
+)
+def test_open_question_direction_check(question: str, sender_directed: bool) -> None:
+    from app.agent.schemas import is_sender_directed
+
+    assert is_sender_directed(question) is sender_directed
+
+
+def test_draft_prompt_says_open_questions_are_for_the_owner() -> None:
+    system, _ = draft_prompt(state())
+    assert "checklist for the OWNER" in system
+    assert "never questions to the sender" in system

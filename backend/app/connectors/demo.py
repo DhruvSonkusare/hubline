@@ -15,8 +15,14 @@ from datetime import datetime, timedelta
 
 from pydantic import BaseModel, Field
 
-from app.connectors.base import AuthType, Capability, Connector, ConnectorDescriptor
-from app.connectors.models import FetchResult, NormalizedMessage, Sender
+from app.connectors.base import (
+    AuthType,
+    Capability,
+    Connector,
+    ConnectorDescriptor,
+    PermanentConnectorError,
+)
+from app.connectors.models import FetchResult, NormalizedMessage, ReplyContext, Sender, SendResult
 from app.connectors.registry import register
 
 
@@ -169,7 +175,9 @@ class DemoConnector(Connector):
         key="demo",
         display_name="Demo data",
         auth_type=AuthType.NONE,
-        capabilities=frozenset({Capability.POLL, Capability.SAMPLE}),
+        # SEND = the demo outbox: approved replies are stored and shown, never leave the app.
+        capabilities=frozenset({Capability.POLL, Capability.SAMPLE, Capability.SEND}),
+        max_reply_chars=4000,
         poll_interval_s=60,
         is_demo=True,
         settings_model=DemoSettings,
@@ -201,6 +209,21 @@ class DemoConnector(Connector):
         messages = [self._make(n + i, last_emit + interval * (i + 1)) for i in range(k)]
         new_last = now if due > k else last_emit + interval * k
         return FetchResult(messages=messages, cursor=_encode(n + k, new_last))
+
+    @classmethod
+    def sample_scenarios(cls) -> list[str]:
+        return [sc.key for sc in SCENARIOS]
+
+    async def send(self, thread_id: str, text: str, *, reply_to: ReplyContext) -> SendResult:
+        """Demo outbox: nothing leaves the app. The core stores the reply (outbound_replies +
+        an outbound message in the thread), so Approve and send can be shown end to end."""
+        if not text.strip():
+            raise PermanentConnectorError("empty reply")
+        return SendResult(
+            external_id=f"demo-out-{uuid.uuid4().hex[:12]}",
+            thread_id=thread_id,
+            sent_at=self.ctx.clock(),
+        )
 
     async def sample(self, scenario: str | None = None) -> NormalizedMessage:
         """One fresh message right now, in its own thread (for triggering the agent live).

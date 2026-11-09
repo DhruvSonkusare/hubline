@@ -18,6 +18,7 @@ from app.errors import install_error_handlers
 from app.logging import configure_logging, request_id_middleware
 from app.runtime import Runtime
 from app.services.connector_runtime import sync_registry
+from app.services.replies import reap_stale_sending
 from app.workers.agent_worker import AgentWorker
 from app.workers.runner import WorkRunner
 from app.workers.scheduler import Scheduler
@@ -42,6 +43,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         async with sessionmaker() as session, session.begin():
             await sync_registry(session, settings)
+        await reap_stale_sending(sessionmaker)  # crash mid-send -> 'unknown', never resent
 
         # Scheduler and worker always exist: the loops are optional (R3), but /internal/tick
         # and on-demand kicks use the same objects when the loops are off (Render free).
