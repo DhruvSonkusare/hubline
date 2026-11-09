@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from app.connectors.models import (
     FetchResult,
+    NormalizedMessage,
     ReplyContext,
     SendResult,
     WebhookRequest,
@@ -34,6 +35,7 @@ class Capability(StrEnum):
     POLL = "poll"
     WEBHOOK = "webhook"
     SEND = "send"
+    SAMPLE = "sample"  # can generate one message on demand (demo/presenting)
 
 
 class AuthType(StrEnum):
@@ -111,6 +113,11 @@ class Connector(ABC):
     async def parse_webhook(self, request: WebhookRequest) -> WebhookResult:
         """Verify the request signature FIRST (raise WebhookVerificationError), then parse."""
         raise NotImplementedError(f"{self.describe().key} does not accept webhooks")
+
+    async def sample(self, scenario: str | None = None) -> NormalizedMessage:
+        """Generate one fresh message now (Capability.SAMPLE). Raise ValueError for a bad
+        scenario name."""
+        raise NotImplementedError(f"{self.describe().key} cannot generate sample messages")
 
     async def maintain(self) -> None:  # noqa: B027 - optional hook, intentionally empty
         """Optional periodic hook (e.g. renew a webhook subscription)."""

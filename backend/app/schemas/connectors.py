@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Any
 
@@ -37,3 +38,15 @@ class ConnectorPatch(BaseModel):
 
 class SyncScheduled(BaseModel):
     status: str = "scheduled"
+
+
+class SampleIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scenario: str | None = None
+
+
+class SampleOut(BaseModel):
+    message_id: uuid.UUID
+    external_id: str
+    agent_job_enqueued: bool

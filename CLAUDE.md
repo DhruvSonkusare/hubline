@@ -16,7 +16,11 @@ The full approved plan is **[docs/PLAN.md](docs/PLAN.md)**. Its "Revisions" (R1â
 
 - **Backend:** Python 3.12, FastAPI, SQLAlchemy 2 async + asyncpg, Alembic, pydantic-settings, pytest. Managed with **uv** (`backend/pyproject.toml`, `uv.lock`).
 - **Database:** Postgres (Neon free tier in production, Singapore / AWS ap-southeast-1). SQL only.
-- **Agent:** LangGraph. Model chosen by env: `LLM_PROVIDER=anthropic`, `LLM_MODEL=claude-haiku-5-5` (triage), `LLM_DRAFT_MODEL=claude-sonnet-5-5` (drafts). Budget about $5/month (`AGENT_MAX_JOBS_PER_HOUR`). **The agent never sends.** It has no tools and no access to `send()`.
+- **Agent:** LangGraph orchestration (`app/agent/graph.py`). Model chosen by env: `LLM_PROVIDER=anthropic`, `LLM_MODEL=claude-haiku-5-5` (triage), `LLM_DRAFT_MODEL=claude-sonnet-5-5` (drafts). `LLM_PROVIDER=fake` (the default) is offline and used by all tests. Budget about $5/month (`AGENT_MAX_JOBS_PER_HOUR=30`). **The agent never sends.** It has no tools and no access to `send()`.
+- **Anthropic calls use the official `anthropic` SDK**: `messages.parse(output_format=..., output_config={"effort": ...})`, not LangChain.
+  - Why: current Claude models reject `temperature` and forced `tool_choice`, and LangChain's `with_structured_output` relies on forced `tool_choice`.
+  - Never send `temperature`.
+  - Other providers go through LangChain `init_chat_model`, behind the same `StructuredLLM` interface in `app/agent/llm.py`.
 - **Background work:** the scheduler and agent worker run inside the backend process. Work is claimed with `SELECT â€¦ FOR UPDATE SKIP LOCKED` plus a lease. They are idle-friendly (sleep up to `*_IDLE_MAX_S`, default 60s) and switchable with `ENABLE_SCHEDULER` / `ENABLE_AGENT_WORKER`.
 - **Frontend:** Next.js App Router + TypeScript + Tailwind on Vercel (functions in `sin1`). Auth.js GitHub login with an allowlist. BFF pattern: the browser talks only to Next.js; the Next.js server calls the backend with `BACKEND_API_TOKEN`. No secrets in `NEXT_PUBLIC_*`.
 - **Backend hosting:** Railway Hobby, Singapore, 1 replica, 1 uvicorn worker.
@@ -35,6 +39,12 @@ The full approved plan is **[docs/PLAN.md](docs/PLAN.md)**. Its "Revisions" (R1â
 - **Incremental schema (R1):** each step adds only the tables and columns it uses, in its own Alembic migration (`0001` Step 1, `0002` Step 2, â€¦). Migrations are hand-written and must pass `alembic check` / `tests/test_migrations.py`.
 - **Dropped for v1 (R2):** the audit_events table, tsvector search, and MultiFernet rotation.
 - **Sending is at-most-once:** a human triggers it, with an idempotency key. Never retry a send automatically.
+- **The agent graph is pure.** It never touches the DB. The worker loads context, runs the graph with no transaction open, then persists. Drafts are versioned (`drafts.version`), and the message row is locked when a new version is written.
+- **Agent jobs:**
+  - One active job per message, enforced by a partial unique index.
+  - Ingest enqueues triage in the same transaction as the insert.
+  - A refusal or config error kills a job immediately; other errors retry per `AGENT_RETRY_DELAYS_S`.
+  - The reaper re-queues jobs stuck in `running`.
 - **Errors:** always `{"error": {"code", "message", "details"}}` via `app.errors.ApiError`.
 - **`/healthz` must not touch the DB.** Use `/readyz` for DB checks.
 

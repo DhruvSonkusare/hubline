@@ -39,7 +39,7 @@ TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL", "postgresql+asyncpg://hubline:hubline@localhost:5433/hubline_test"
 )
 TEST_TOKEN = "test-token-0123456789abcdef0123456789abcdef"
-TABLES = ("messages", "threads", "sync_state", "connector_accounts")
+TABLES = ("agent_jobs", "drafts", "messages", "threads", "sync_state", "connector_accounts")
 
 discover()  # register the real connectors once for the whole session
 

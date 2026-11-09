@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.connectors.models import NormalizedMessage
 from app.models import ConnectorAccount, Message, Thread
 from app.models.message import BODY_MAX_CHARS
+from app.services.jobs import enqueue_triage
 
 RAW_MAX_BYTES = 64_000
 
@@ -29,6 +30,7 @@ class IngestResult:
     inserted: int = 0
     duplicates: int = 0
     new_inbound_ids: list[uuid.UUID] = field(default_factory=list)
+    jobs_enqueued: int = 0
 
 
 async def ingest_messages(
@@ -67,6 +69,8 @@ async def ingest_messages(
                 reply_meta=msg.reply_meta,
                 raw=_trim_raw(msg.raw),
                 is_demo=msg.is_demo or account.is_demo,
+                # outbound rows never go to the agent
+                agent_status="pending" if direction == "inbound" else "skipped",
             )
             .on_conflict_do_nothing(index_elements=["source", "external_id"])
             .returning(Message.id)
@@ -91,6 +95,9 @@ async def ingest_messages(
                 )
                 .values(status="replied", status_changed_at=func.now())
             )
+
+    # Same transaction as the inserts: a committed message always has its triage job.
+    result.jobs_enqueued = await enqueue_triage(session, result.new_inbound_ids)
     return result
 
 

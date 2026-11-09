@@ -109,3 +109,20 @@ async def test_non_webhook_connectors_reject_webhooks(key: str) -> None:
         connector = cls(make_ctx(cls, http))
         with pytest.raises(NotImplementedError):
             await connector.parse_webhook(WebhookRequest("POST", "/", {}, {}, b""))
+
+
+@pytest.mark.parametrize("key", KEYS)
+async def test_sample_capable_connectors_generate_valid_unique_messages(key: str) -> None:
+    from app.connectors.base import Capability
+
+    cls = registry.get(key)
+    if Capability.SAMPLE not in cls.describe().capabilities:
+        pytest.skip("no sample capability")
+    async with httpx.AsyncClient() as http:
+        connector = cls(make_ctx(cls, http))
+        a, b = await connector.sample(), await connector.sample()
+        with pytest.raises(ValueError):  # noqa: PT011 - message wording is connector-specific
+            await connector.sample("definitely-not-a-scenario")
+    assert a.source == b.source == key
+    assert a.external_id != b.external_id
+    assert a.received_at == FIXED_NOW

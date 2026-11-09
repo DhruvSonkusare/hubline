@@ -10,7 +10,8 @@ from app.schemas.common import decode_cursor, encode_cursor
 def test_roundtrip() -> None:
     ts = datetime(2026, 11, 9, 8, 30, 15, 123456, tzinfo=UTC)
     rid = uuid.uuid4()
-    assert decode_cursor(encode_cursor(ts, rid)) == (ts, rid)
+    assert decode_cursor(encode_cursor(ts, rid)) == (ts, rid, None)
+    assert decode_cursor(encode_cursor(ts, rid, 4)) == (ts, rid, 4)
 
 
 @pytest.mark.parametrize("bad", ["", "not-base64!!", "WyJ4Il0", encode_cursor.__name__])

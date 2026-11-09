@@ -8,7 +8,7 @@ from __future__ import annotations
 from functools import cached_property
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _ENV_CONFIG = SettingsConfigDict(
@@ -65,9 +65,44 @@ class Settings(DatabaseSettings):
     # --- Owner
     owner_timezone: str = "Asia/Kolkata"
 
+    # --- LLM (Step 2). "fake" = deterministic offline model (default: never spends money);
+    #     "anthropic" = official Anthropic SDK; anything else = LangChain init_chat_model provider.
+    llm_provider: str = "fake"
+    llm_model: str = "claude-haiku-5-5"  # triage
+    llm_draft_model: str | None = None  # drafts; defaults to llm_model
+    llm_effort: Literal["low", "medium", "high"] = "low"  # Anthropic output_config.effort
+    llm_timeout_s: float = Field(default=60.0, gt=0)
+    llm_max_retries: int = Field(default=3, ge=0, le=10)  # transport retries (429/5xx/network)
+    anthropic_api_key: SecretStr | None = None
+
+    # --- Agent worker
+    agent_concurrency: int = Field(default=2, ge=1, le=10)
+    agent_max_jobs_per_hour: int = Field(default=30, ge=0)  # budget guard; 0 = pause the agent
+    agent_retry_delays_s: str = "30,120,600"  # wait before attempt 2, 3, ...
+    agent_job_timeout_s: float = Field(default=180.0, gt=0)
+    agent_stale_after_s: int = Field(default=600, ge=60)  # running longer than this = crashed
+    agent_maintenance_interval_s: int = Field(default=900, ge=60)
+    worker_min_sleep_s: float = Field(default=2.0, gt=0)
+    agent_thread_context: int = Field(default=8, ge=0, le=50)
+    agent_owner_name: str = "Dhruv Sonkusare"
+    agent_owner_context: str = "Python backend developer"
+    agent_vip_senders: str = ""  # comma list of sender ids / emails
+
     @cached_property
     def api_tokens(self) -> tuple[str, ...]:
         return tuple(t.strip() for t in self.backend_api_tokens.split(",") if t.strip())
+
+    @cached_property
+    def retry_delays(self) -> tuple[float, ...]:
+        return tuple(float(x) for x in self.agent_retry_delays_s.split(",") if x.strip())
+
+    @cached_property
+    def vip_senders(self) -> tuple[str, ...]:
+        return tuple(v.strip().lower() for v in self.agent_vip_senders.split(",") if v.strip())
+
+    @property
+    def draft_model(self) -> str:
+        return self.llm_draft_model or self.llm_model
 
     @cached_property
     def connector_allowlist(self) -> frozenset[str] | None:
@@ -84,4 +119,10 @@ class Settings(DatabaseSettings):
             raise ValueError(
                 "BACKEND_API_TOKENS entries must be at least 32 characters in production"
             )
+        try:
+            delays = [float(x) for x in self.agent_retry_delays_s.split(",") if x.strip()]
+        except ValueError:
+            raise ValueError("AGENT_RETRY_DELAYS_S must be a comma list of seconds") from None
+        if not delays or any(d < 0 for d in delays):
+            raise ValueError("AGENT_RETRY_DELAYS_S must contain non-negative numbers")
         return self

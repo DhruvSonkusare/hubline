@@ -9,6 +9,8 @@ from pydantic import BaseModel
 PREVIEW_CHARS = 200
 
 StatusFilter = Literal["open", "replied", "dismissed", "all"]
+AgentStatus = Literal["pending", "running", "done", "failed", "skipped"]
+SortOrder = Literal["received", "priority"]
 
 
 class SenderOut(BaseModel):
@@ -17,7 +19,7 @@ class SenderOut(BaseModel):
 
 
 class MessageSummary(BaseModel):
-    """Feed row. Agent fields (priority, summary, ...) are added in Step 2."""
+    """Feed row."""
 
     id: uuid.UUID
     source: str
@@ -30,6 +32,14 @@ class MessageSummary(BaseModel):
     received_at: datetime
     status: Literal["open", "replied", "dismissed"]
     thread_id: uuid.UUID
+    # agent output (Step 2)
+    priority: int | None
+    summary: str | None
+    needs_reply: bool | None
+    category: str | None
+    agent_status: AgentStatus
+    agent_error: str | None
+    has_draft: bool
 
 
 class MessagePage(BaseModel):

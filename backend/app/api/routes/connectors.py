@@ -9,12 +9,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_runtime, get_session
 from app.connectors import registry
+from app.connectors.base import Capability
 from app.errors import ApiError, not_found
 from app.models import ConnectorAccount, SyncState
 from app.runtime import Runtime
 from app.schemas.common import ErrorBody
-from app.schemas.connectors import ConnectorOut, ConnectorPatch, SyncScheduled
-from app.services.connector_runtime import allowed_by_env, missing_settings
+from app.schemas.connectors import (
+    ConnectorOut,
+    ConnectorPatch,
+    SampleIn,
+    SampleOut,
+    SyncScheduled,
+)
+from app.services.connector_runtime import allowed_by_env, build_connector, missing_settings
+from app.services.ingest import ingest_messages
 
 router = APIRouter(prefix="/api/connectors", tags=["connectors"])
 
@@ -153,3 +161,39 @@ async def sync_connector(
     await session.commit()
     runtime.wakeups.scheduler.set()
     return SyncScheduled()
+
+
+@router.post("/{key}/sample", response_model=SampleOut, status_code=201, responses=_ERRORS)
+async def create_sample_message(
+    key: str,
+    body: SampleIn | None = None,
+    session: AsyncSession = Depends(get_session),
+    runtime: Runtime = Depends(get_runtime),
+) -> SampleOut:
+    """Generate one message right now (e.g. to trigger the agent live while presenting).
+
+    Works even when the connector's scheduled polling is disabled; the connector only has to be
+    connected and declare the `sample` capability.
+    """
+    account, _ = await _load(session, key)
+    if Capability.SAMPLE not in registry.get(key).describe().capabilities:
+        raise ApiError(409, "not_supported", f"{key} cannot generate sample messages")
+    if account.status != "connected":
+        raise ApiError(409, "invalid_state", f"{key} must be connected (status {account.status!r})")
+    connector = build_connector(account, runtime.settings, runtime.http)
+    try:
+        message = await connector.sample(body.scenario if body else None)
+    except ValueError as exc:
+        raise ApiError(422, "invalid_scenario", str(exc)) from None
+
+    result = await ingest_messages(session, account, [message])
+    await session.commit()
+    if not result.new_inbound_ids:  # pragma: no cover - ids are random
+        raise ApiError(409, "duplicate", "sample collided with an existing message")
+    if result.jobs_enqueued:
+        runtime.wakeups.agent.set()
+    return SampleOut(
+        message_id=result.new_inbound_ids[0],
+        external_id=message.external_id,
+        agent_job_enqueued=result.jobs_enqueued > 0,
+    )

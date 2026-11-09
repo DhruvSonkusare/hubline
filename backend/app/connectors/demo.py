@@ -8,6 +8,8 @@ exists (Step 2), the demo never burns through the LLM budget.
 from __future__ import annotations
 
 import json
+import random
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -167,7 +169,7 @@ class DemoConnector(Connector):
         key="demo",
         display_name="Demo data",
         auth_type=AuthType.NONE,
-        capabilities=frozenset({Capability.POLL}),
+        capabilities=frozenset({Capability.POLL, Capability.SAMPLE}),
         poll_interval_s=60,
         is_demo=True,
         settings_model=DemoSettings,
@@ -199,6 +201,32 @@ class DemoConnector(Connector):
         messages = [self._make(n + i, last_emit + interval * (i + 1)) for i in range(k)]
         new_last = now if due > k else last_emit + interval * k
         return FetchResult(messages=messages, cursor=_encode(n + k, new_last))
+
+    async def sample(self, scenario: str | None = None) -> NormalizedMessage:
+        """One fresh message right now, in its own thread (for triggering the agent live).
+        Not counted against max_messages, and works even while the drip is disabled."""
+        by_key = {sc.key: sc for sc in SCENARIOS}
+        if scenario is None:
+            sc = random.choice(SCENARIOS)
+        elif scenario in by_key:
+            sc = by_key[scenario]
+        else:
+            raise ValueError(
+                f"unknown scenario {scenario!r}; choose one of: {', '.join(sorted(by_key))}"
+            )
+        token = uuid.uuid4().hex[:10]
+        return NormalizedMessage(
+            source="demo",
+            external_id=f"demo-live-{token}",
+            thread_id=f"demo:live:{token}",
+            sender=Sender(id=sc.sender_id, name=sc.sender_name),
+            body=sc.body,
+            received_at=self.ctx.clock(),
+            subject=sc.subject,
+            thread_title=sc.title,
+            raw={"scenario": sc.key, "live": True},
+            is_demo=True,
+        )
 
     def _make(self, n: int, received_at: datetime) -> NormalizedMessage:
         sc = SCENARIOS[n % len(SCENARIOS)]

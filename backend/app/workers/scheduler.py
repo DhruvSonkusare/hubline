@@ -80,11 +80,13 @@ class Scheduler:
         http: httpx.AsyncClient,
         wake: asyncio.Event,
         instance_id: str | None = None,
+        agent_wake: asyncio.Event | None = None,
     ) -> None:
         self.sessionmaker = sessionmaker
         self.settings = settings
         self.http = http
         self.wake = wake
+        self.agent_wake = agent_wake
         self.instance_id = instance_id or f"{socket.gethostname()}:{os.getpid()}"
 
     async def run(self, stop: asyncio.Event) -> None:
@@ -161,6 +163,8 @@ class Scheduler:
                         )
                     )
                 inserted += ingested.inserted
+                if ingested.jobs_enqueued and self.agent_wake is not None:
+                    self.agent_wake.set()
                 if not result.has_more:
                     break
         except AuthExpiredError as exc:

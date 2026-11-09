@@ -18,6 +18,7 @@ from app.errors import install_error_handlers
 from app.logging import configure_logging, request_id_middleware
 from app.runtime import Runtime
 from app.services.connector_runtime import sync_registry
+from app.workers.agent_worker import AgentWorker
 from app.workers.scheduler import Scheduler
 from app.workers.supervisor import Supervisor, Wakeups
 
@@ -42,19 +43,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await sync_registry(session, settings)
 
         if settings.enable_scheduler:
-            scheduler = Scheduler(sessionmaker, settings, http, runtime.wakeups.scheduler)
+            scheduler = Scheduler(
+                sessionmaker,
+                settings,
+                http,
+                runtime.wakeups.scheduler,
+                agent_wake=runtime.wakeups.agent,
+            )
             supervisor.start("scheduler", scheduler.run)
         else:
             supervisor.mark("scheduler", "disabled")
-        # The agent worker arrives in Step 2; the flag is honoured from day one.
-        supervisor.mark(
-            "agent_worker", "not_implemented" if settings.enable_agent_worker else "disabled"
-        )
+        if settings.enable_agent_worker:
+            worker = AgentWorker(sessionmaker, settings, runtime.wakeups.agent)
+            supervisor.start("agent_worker", worker.run)
+        else:
+            supervisor.mark("agent_worker", "disabled")
+        if settings.llm_provider == "anthropic" and settings.anthropic_api_key is None:
+            log.warning("anthropic_api_key_missing", hint="set ANTHROPIC_API_KEY")
         log.info(
             "startup_complete",
             version=__version__,
             env=settings.app_env,
             connectors=connectors,
+            llm_provider=settings.llm_provider,
             workers=supervisor.status,
         )
         try:
