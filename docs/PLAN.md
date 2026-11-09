@@ -26,7 +26,7 @@
 | 1 | Login-only dashboard. You present while logged in. |
 | 2 | Dedicated demo Gmail account and a demo Slack workspace. |
 | 3 | **Teams:** we assume no work/school tenant. The Teams connector is built and tested against mocks in Step 6. In production it runs on labelled demo data unless `MS_*` env vars are set later. |
-| 4 | **LLM (R7, R8):** Groq free tier, `LLM_PROVIDER=groq`, `LLM_MODEL=openai/gpt-oss-120b` for both triage and drafts, `reasoning_effort=low`.<ul><li>Gemini free tier is the alternative, for demo data only.</li><li>Budget guards: `AGENT_MAX_JOBS_PER_HOUR=3` and `AGENT_MAX_TOKENS_PER_DAY=180000` (90% of Groq's 200K TPD).</li><li>The rule-based prefilter skips bulk mail, drafts happen only when needed, and the demo connector emits at most 3 messages an hour.</li><li>Cost: $0.</li></ul> |
+| 4 | **LLM (R7, R8):** Groq free tier, `LLM_PROVIDER=groq`, `LLM_MODEL=openai/gpt-oss-120b` for both triage and drafts, `reasoning_effort=low`.<ul><li>Gemini free tier is the alternative, for demo data only.</li><li>Budget guards: `AGENT_MAX_TOKENS_PER_DAY=180000` (90% of Groq's 200K TPD) and the per-minute pacer are the real limits. `AGENT_MAX_JOBS_PER_HOUR=30` only shapes bursts (Addendum 3).</li><li>Backfill auto-triages only the newest 10 per connector.</li><li>Jobs are claimed in priority order: dashboard actions, then live messages, then backfill.</li><li>The rule-based prefilter skips bulk mail, drafts happen only when needed, and the demo connector emits at most 3 messages an hour.</li><li>Cost: $0.</li></ul> |
 | 5 | **Hosting (R6, R9): Render Free, Singapore. No background loops**; work runs on a 30-minute GitHub Actions cron (`/internal/tick`), on startup, and on demand. There are no keep-alive pings, so Neon can sleep. Slack's retries cover webhooks that arrive during a cold start (§8). Cost: $0. |
 | 6 | Slack replies post as you (user token). You are admin of the demo workspace. |
 | 7 | Dashboard login is GitHub OAuth (Auth.js). |
@@ -713,7 +713,8 @@ These are produced with `model.with_structured_output(Schema)`, which uses tool 
 ### Free-tier pacing and budgets (R8)
 - **Pacer:** a per-model sliding-window limiter (`LLM_RPM=30`, `LLM_TPM=8000`) waits up to 20s for a slot. Beyond that it raises a rate-limit error, so the job is deferred.
 - **Provider 429:** read `retry-after`, Groq's `x-ratelimit-reset-*` headers or Gemini's `retryDelay`. The job goes back to `pending` with `run_after = now() + retry_after`, its attempt is not counted, and the worker pauses for that long. **A 429 never fails a job.**
-- **Daily budget:** `agent_jobs.input_tokens/output_tokens` are added up on every attempt. The worker stops claiming when the rolling 24h sum reaches `AGENT_MAX_TOKENS_PER_DAY` (180K = 90% of Groq's TPD), or when it has started `AGENT_MAX_JOBS_PER_HOUR` (3) jobs in the last hour.
+- **Daily budget:** `agent_jobs.input_tokens/output_tokens/reasoning_tokens` are added up on every attempt. The worker stops claiming when the rolling 24h sum reaches `AGENT_MAX_TOKENS_PER_DAY` (180K = 90% of Groq's TPD). `AGENT_MAX_JOBS_PER_HOUR` (30) only shapes bursts. Measured: ≈ 1.0K tokens/message on average, 1.8K max (Addendum 3), so 180K covers ≈ 100–180 messages/day.
+- **Backfill and priority:** a connector's first sync stores all history. Only the newest `BACKFILL_AUTO_TRIAGE` (10) are queued, at priority 0; the rest are `skipped` (Triage on request). Live messages queue at 10 and dashboard actions (Triage/Redraft/Retry, samples) at 20. Jobs are claimed `ORDER BY priority DESC, run_after` (migration `0004`).
 - **Prompt size:** the message body is clipped to 2,000 characters, thread context to 3 messages × 300 characters, and the previous draft to 1,500 characters. Output caps are 400 tokens (triage) and 600 (draft).
 
 ### Retries and failure states
@@ -870,8 +871,8 @@ With 24/7 ticks (48/day) the total is ≈ 56. With hourly ticks it is ≈ 33. If
 | Core | `DATABASE_URL`, `BACKEND_API_TOKENS`, `CREDENTIALS_ENCRYPTION_KEY`, `PUBLIC_BASE_URL`, `FRONTEND_URL`, `LOG_LEVEL`, `APP_ENV=production` |
 | Work model (R9) | `ENABLE_SCHEDULER=false`, `ENABLE_AGENT_WORKER=false`, `WORK_ON_DEMAND=true`, `TICK_ON_STARTUP=true`, `TICK_SECRET`, `TICK_BUDGET_S=60`, `DEMO_MODE=false` |
 | LLM (R7, R8) | `LLM_PROVIDER=groq`, `LLM_MODEL=openai/gpt-oss-120b`, `GROQ_API_KEY`, `LLM_RPM=30`, `LLM_TPM=8000` (or `google_genai` + `GOOGLE_API_KEY`) |
-| Agent | `AGENT_CONCURRENCY=1`, `AGENT_MAX_JOBS_PER_HOUR=3`, `AGENT_MAX_TOKENS_PER_DAY=180000`, `AGENT_OWNER_NAME`, `AGENT_OWNER_CONTEXT`, `AGENT_VIP_SENDERS`, `OWNER_TIMEZONE` |
-| Ingest | `BACKFILL_HOURS`, `BACKFILL_MAX`, `RETENTION_DAYS` |
+| Agent | `AGENT_CONCURRENCY=1`, `AGENT_MAX_JOBS_PER_HOUR=30`, `AGENT_MAX_TOKENS_PER_DAY=180000`, `AGENT_OWNER_NAME`, `AGENT_OWNER_CONTEXT`, `AGENT_VIP_SENDERS`, `OWNER_TIMEZONE` |
+| Ingest | `BACKFILL_HOURS`, `BACKFILL_MAX`, `BACKFILL_AUTO_TRIAGE=10`, `RETENTION_DAYS` |
 | Google | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` |
 | Slack | `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `SLACK_SIGNING_SECRET` |
 | Microsoft | `MS_CLIENT_ID`, `MS_CLIENT_SECRET`, `MS_TENANT` (`organizations` or a tenant id) |
@@ -1085,7 +1086,7 @@ E2E auth: Playwright uses an Auth.js Credentials provider that is **only compile
   - The first dashboard load after idle waits about a minute.
   - Gmail is polled only on ticks (every 30 min) or on "sync now".
   - Render may restart free services at any time; the leases and reaper make that safe.
-- **Free LLM limits (Groq: 200K tokens/day, 8K/min, 1K requests/day):** throughput is capped at 3 messages/hour (72/day) by design. On a demo day, raise `AGENT_MAX_JOBS_PER_HOUR`; the 24h token guard still protects the daily limit. Free-tier model line-ups change, so the model is an env var and `scripts/llm_probe.py` checks a new one in a single call.
+- **Free LLM limits (Groq: 200K tokens/day, 8K/min, 1K requests/day):** at the measured ≈ 1.0K tokens/message (1.8K max), the 180K daily budget covers ≈ 100–180 messages/day. That is plenty for demo accounts. Backfill is limited to 10 auto-triaged messages per connector. Free-tier model line-ups change, so the model is an env var and `scripts/llm_probe.py` checks a new one in a single call.
 - **Gemini free tier data use:** Google may use free-tier prompts to improve its products, and humans may review them. Gemini is therefore for demo accounts only.
 - **GitHub Actions schedules** can run late and are disabled after 60 days without repo activity. The README notes this; re-enable from the Actions tab.
 - **In-process workers** (fixed by the brief): simple, but a deploy restarts them. The leases and reaper make this safe. LLM calls share the web event loop, but they are async, so API latency isn't affected.

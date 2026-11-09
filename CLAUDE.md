@@ -30,7 +30,9 @@ The full approved plan is **[docs/PLAN.md](docs/PLAN.md)**. Its "Revisions" (R1�
 - **Free-tier limits (R8):**
   - A per-model RPM/TPM pacer runs on every call.
   - A provider 429 **defers** the job by `retry-after` (attempt not counted) and pauses the worker. **It never fails a job.**
-  - A rolling 24h token budget is summed from `agent_jobs` token columns (`AGENT_MAX_TOKENS_PER_DAY=180000`), alongside `AGENT_MAX_JOBS_PER_HOUR=3`.
+  - A rolling 24h token budget is summed from `agent_jobs` token columns (`AGENT_MAX_TOKENS_PER_DAY=180000`), with `AGENT_MAX_JOBS_PER_HOUR=30` for burst shaping only. The token budget and the per-minute pacer are the real limits.
+  - **Backfill** (a connector's first sync) is stored in full, but only the newest `BACKFILL_AUTO_TRIAGE=10` per connector are auto-triaged. The rest are `agent_status='skipped'`, with Triage available on request.
+  - **Job priority** (`agent_jobs.priority`, claimed highest first): dashboard actions 20 > live messages 10 > backfill 0.
   - Prompts are clipped (body 2,000 chars, thread 3×300). Output caps: 400 tokens (triage), 600 (draft).
 - **Background work (R3, R9):** the scheduler and agent worker live inside the backend process. Work is claimed with `SELECT … FOR UPDATE SKIP LOCKED` plus a lease.
   - **Local:** the loops run, idling up to `*_IDLE_MAX_S` (600s, above Neon's 5-min suspend).

@@ -146,7 +146,12 @@ All `/api/*` routes need `Authorization: Bearer <BACKEND_API_TOKENS entry>`. Onl
 | POST | `/api/connectors/{key}/sample` | Generate one message now. Only for connectors with the `sample` capability, i.e. demo. Optional body `{"scenario": "<name>"}`. The agent triages it within seconds. |
 | POST | `/internal/tick` | **Cron endpoint**, header `X-Tick-Secret: $TICK_SECRET`. Runs one scheduler pass, then drains agent jobs for at most `TICK_BUDGET_S` (60s). `?wait=true` returns `{polled, agent_jobs, elapsed_s, stopped}`; otherwise it answers `202` and runs in the background. Returns 404 unless `TICK_SECRET` is set. |
 
-**Free cron:** [.github/workflows/tick.yml](.github/workflows/tick.yml) calls the tick every 30 minutes from 06:30 to 23:00 IST. It stays inert until the repository secrets `TICK_URL` and `TICK_SECRET` exist. GitHub may delay scheduled runs, and it disables them after 60 days without repo activity; re-enable from the Actions tab.
+**Free cron:** [.github/workflows/tick.yml](.github/workflows/tick.yml) calls the tick every 30 minutes from 06:30 to 23:00 IST. It stays inert until the repository secrets `TICK_URL` and `TICK_SECRET` exist.
+
+> **GitHub Actions schedule caveats:**
+> - Scheduled runs **can be delayed**, especially at busy times, so a tick may land minutes late.
+> - GitHub **disables scheduled workflows after 60 days without repository activity** (on public repos). If ticks stop, re-enable the workflow in the **Actions** tab or push any commit.
+> - The app also ticks when it boots and runs work on demand, so a late or missed tick only delays polling. Nothing is lost.
 
 ## Configuration
 
@@ -169,7 +174,8 @@ Every setting is an environment variable. Locally they live in `backend/.env`; s
 | `LLM_EFFORT` | `low` | Reasoning effort, where the model supports it (gpt-oss, Anthropic). |
 | `GROQ_API_KEY` / `GOOGLE_API_KEY` / `ANTHROPIC_API_KEY` | unset | Key for the chosen provider. |
 | `LLM_RPM` / `LLM_TPM` | `30` / `8000` | Client-side pacing per model; Groq free limits for gpt-oss-120b. `0` turns it off. |
-| `AGENT_MAX_JOBS_PER_HOUR` | `3` | Hourly job cap, sized so 24 h × 3 × 2.5K tokens fits the daily budget. `0` pauses the agent. Raise it on demo days; the daily token guard still applies. |
+| `AGENT_MAX_JOBS_PER_HOUR` | `30` | Burst shaping only. The rolling 24 h token budget and the per-minute pacer are the real limits. `0` pauses the agent. |
+| `BACKFILL_AUTO_TRIAGE` | `10` | A connector's first sync stores all history but auto-triages only the newest N (at the lowest priority). The rest stay `skipped`, with Triage available on request. |
 | `AGENT_MAX_TOKENS_PER_DAY` | `180000` | Rolling 24 h token budget: 90% of Groq's free 200K tokens/day. `0` turns it off. |
 | `AGENT_CONCURRENCY` | `1` | Jobs processed in parallel; 1 fits the 8K tokens/min free limit. |
 | `AGENT_RETRY_DELAYS_S` | `30,120,600` | Waits between retries. After 3 attempts the message shows `agent_status=failed`. |

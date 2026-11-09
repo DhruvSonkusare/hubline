@@ -52,7 +52,12 @@ async def main(args: argparse.Namespace) -> int:
         owner=OwnerProfile(settings.agent_owner_name, settings.agent_owner_context, "Asia/Kolkata"),
     )
     system, prompt = triage_prompt(state)
-    print(f"provider={provider} model={model} method={getattr(llm, '_structured_kwargs', {})}")
+    chat_model = getattr(llm, "_model", None)
+    print(
+        f"provider={provider} model={model} method={getattr(llm, '_structured_kwargs', {})} "
+        f"reasoning_effort={getattr(chat_model, 'reasoning_effort', None)} "
+        f"max_tokens={getattr(chat_model, 'max_tokens', None)}"
+    )
     start = time.monotonic()
     try:
         result = await call_structured(
@@ -71,7 +76,11 @@ async def main(args: argparse.Namespace) -> int:
     u = llm.usage
     print(f"OK in {elapsed:.1f}s: priority={result.priority} category={result.category}")
     print(f"   summary: {result.summary}")
-    print(f"   tokens: in={u.input_tokens} out={u.output_tokens} total={u.total_tokens}")
+    print(
+        f"   tokens: in={u.input_tokens} out={u.output_tokens} "
+        f"(of which reasoning={u.reasoning_tokens}, answer={u.output_tokens - u.reasoning_tokens})"
+        f" total={u.total_tokens}"
+    )
     return 0
 
 

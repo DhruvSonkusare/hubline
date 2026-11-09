@@ -68,6 +68,9 @@ class Settings(DatabaseSettings):
     connectors_enabled: str | None = None  # optional comma allowlist; unset = all registered
     backfill_hours: int = Field(default=48, ge=1, le=24 * 30)
     backfill_max: int = Field(default=50, ge=1, le=500)
+    # Backfill is stored in full, but only the newest N per connector are auto-triaged; the rest
+    # are agent_status="skipped" (triage on request). Protects the free daily token budget.
+    backfill_auto_triage: int = Field(default=10, ge=0, le=500)
 
     # --- Owner
     owner_timezone: str = "Asia/Kolkata"
@@ -96,7 +99,8 @@ class Settings(DatabaseSettings):
     # --- Agent worker
     agent_concurrency: int = Field(default=1, ge=1, le=10)
     # Budget guards (free tier): see reports/step-2-report.md for the arithmetic.
-    agent_max_jobs_per_hour: int = Field(default=3, ge=0)  # 0 = pause the agent
+    # burst shaping only; the rolling 24h token budget + per-minute pacer are the real limits
+    agent_max_jobs_per_hour: int = Field(default=30, ge=0)  # 0 = pause the agent
     agent_max_tokens_per_day: int = Field(default=180_000, ge=0)  # rolling 24h; 0 = off
     agent_body_chars: int = Field(default=2000, ge=200)  # message text sent to the LLM
     agent_thread_item_chars: int = Field(default=300, ge=50)

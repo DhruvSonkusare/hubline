@@ -23,6 +23,7 @@ from app.schemas.connectors import (
 )
 from app.services.connector_runtime import allowed_by_env, build_connector, missing_settings
 from app.services.ingest import ingest_messages
+from app.services.jobs import PRIORITY_USER
 from app.workers.runner import WorkRunner
 
 router = APIRouter(prefix="/api/connectors", tags=["connectors"])
@@ -196,7 +197,8 @@ async def create_sample_message(
     except ValueError as exc:
         raise ApiError(422, "invalid_scenario", str(exc)) from None
 
-    result = await ingest_messages(session, account, [message])
+    # a dashboard action: goes before live and backfill work
+    result = await ingest_messages(session, account, [message], job_priority=PRIORITY_USER)
     await session.commit()
     if not result.new_inbound_ids:  # pragma: no cover - ids are random
         raise ApiError(409, "duplicate", "sample collided with an existing message")

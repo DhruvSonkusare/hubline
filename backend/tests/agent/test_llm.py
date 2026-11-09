@@ -299,3 +299,31 @@ def test_missing_api_key_is_a_clear_config_error(monkeypatch: pytest.MonkeyPatch
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     with pytest.raises(LLMConfigError, match="GROQ_API_KEY"):
         build_llm(make_settings(llm_provider="groq"), "triage")
+
+
+def test_reasoning_tokens_extracted_from_langchain_or_raw_usage() -> None:
+    from app.agent.llm import reasoning_tokens_from
+
+    lc = {"input_tokens": 10, "output_tokens": 90, "output_token_details": {"reasoning": 60}}
+    assert reasoning_tokens_from(lc, {}) == 60
+    groq_raw = {"token_usage": {"completion_tokens_details": {"reasoning_tokens": 33}}}
+    assert reasoning_tokens_from({"output_tokens": 50}, groq_raw) == 33
+    assert reasoning_tokens_from({}, {}) == 0
+
+
+async def test_generate_records_reasoning_tokens() -> None:
+    msg = AIMessage(
+        content="{}",
+        usage_metadata={
+            "input_tokens": 300,
+            "output_tokens": 120,
+            "total_tokens": 420,
+            "output_token_details": {"reasoning": 80},
+        },
+        response_metadata={"finish_reason": "stop"},
+    )
+    llm, _ = make(
+        "groq", "openai/gpt-oss-120b", {"raw": msg, "parsed": GOOD, "parsing_error": None}
+    )
+    await llm.generate(TriageResult, system="s", prompt="p", max_tokens=400)
+    assert (llm.usage.output_tokens, llm.usage.reasoning_tokens) == (120, 80)

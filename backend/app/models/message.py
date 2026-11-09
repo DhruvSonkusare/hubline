@@ -165,6 +165,8 @@ class AgentJob(Base):
     status: Mapped[str] = mapped_column(Text, server_default=text("'pending'"))
     attempts: Mapped[int] = mapped_column(SmallInteger, server_default=text("0"))
     max_attempts: Mapped[int] = mapped_column(SmallInteger, server_default=text("3"))
+    # Claim order (migration 0004): higher first. 20 = dashboard action, 10 = live, 0 = backfill.
+    priority: Mapped[int] = mapped_column(SmallInteger, server_default=text("10"))
     run_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     locked_by: Mapped[str | None] = mapped_column(Text)
@@ -173,6 +175,7 @@ class AgentJob(Base):
     # LLM usage across all attempts (migration 0003): drives the rolling 24h token budget.
     input_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     output_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    reasoning_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))  # 0004
     llm_calls: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -181,7 +184,12 @@ class AgentJob(Base):
     __table_args__ = (
         CheckConstraint("kind IN ('triage', 'redraft')", name="kind"),
         CheckConstraint("status IN ('pending', 'running', 'succeeded', 'dead')", name="status"),
-        Index("ix_agent_jobs_ready", "run_after", postgresql_where=text("status = 'pending'")),
+        Index(
+            "ix_agent_jobs_ready",
+            text("priority DESC"),
+            "run_after",
+            postgresql_where=text("status = 'pending'"),
+        ),
         Index("ix_agent_jobs_message", "message_id"),
         Index(
             "uq_agent_jobs_one_active",

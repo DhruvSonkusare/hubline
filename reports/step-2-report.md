@@ -498,3 +498,146 @@ New tests:
 ## 9. Open questions
 1. **Throughput vs the free budget:** 3 messages/hour sustained (72/day) is what fits 180K tokens/day at a conservative 2.5K/job. Do you want a higher hourly cap with the 24 h token guard as the only hard limit? The cap then only shapes bursts.
 2. **Tick window:** keep 06:30–23:00 IST (≈ 47 CU-h/month), or go 24/7 (≈ 56)?
+
+---
+
+# Addendum 3 (2026-11-09): live checks, measured tokens, backfill limits
+
+**Status:** everything requested is done and verified live. All three checks ran in the order you gave: Neon `verify_db`, then the Groq probe, then the Groq eval.
+- **Eval:** passed **15/15**.
+- **Cost:** **$0** (Groq free tier).
+- **No Anthropic call was made.**
+
+## Changes
+1. **`AGENT_MAX_JOBS_PER_HOUR` raised to 30.** It now only shapes bursts. The rolling 24h token budget (`AGENT_MAX_TOKENS_PER_DAY=180000`) and the per-minute pacer (30 RPM / 8K TPM) are the real limits.
+2. **Ticks stay at 06:30–23:00 IST.** The README now has a callout: GitHub Actions schedules can be delayed, and they are disabled after 60 days without repository activity. It also says how to re-enable them, and why a missed tick only delays polling.
+3. **Backfill can't drain the budget.**
+   - **First sync is stored in full.** A connector's first poll (no cursor yet) inserts every message, across all pages, with `agent_status='skipped'` and an explanatory `agent_error` ("Not auto-triaged: older backfilled message … Use Triage").
+   - **Only the newest 10 are triaged.** When the poll finishes, `promote_newest_backfill` moves the newest `BACKFILL_AUTO_TRIAGE` (default **10**) inbound messages to `pending` and queues them at **priority 0**. The promotion also runs if a later page fails, so pages already committed still get their newest 10.
+   - **The rest wait for the Triage button.** `services.jobs.enqueue(message_id, "triage")` already re-triages a skipped message at dashboard priority; the button arrives in Step 3.
+   - **Priority (migration `0004`):** a new `agent_jobs.priority` column, with claims made `ORDER BY priority DESC, run_after, id` and the ready index rebuilt to match. Live messages from regular polls (and webhooks later) queue at **10**. Dashboard actions (Triage/Redraft/Retry, generated samples) queue at **20**. So live messages and dashboard actions always go before backfill.
+4. **Reasoning tokens are recorded.**
+   - **Effort:** `reasoning_effort=low` is set on the Groq model; the probe prints it from the live model object.
+   - **Source:** reasoning tokens come from LangChain's `usage_metadata.output_token_details.reasoning`, falling back to Groq's raw `completion_tokens_details.reasoning_tokens`.
+   - **Storage:** the per-job total is stored in the new `agent_jobs.reasoning_tokens` column.
+   - **Reporting:** the probe and the eval print input, output and reasoning tokens per message. `output_tokens` *includes* reasoning (provider convention).
+
+## 1. Neon dev branch: `scripts.verify_db`
+```
+target host: ep-<redacted>.c-2.ap-southeast-1.aws.neon.tech
+migrations: at revision 0004; schema diff vs models: none
+/readyz: HTTP 200 {"status":"ok","db":"ok","workers":{"scheduler":"disabled","agent_worker":"disabled"}}
+```
+✔ This closes the Step 1 done-when item. All four migrations apply cleanly on Neon Free (Postgres in Singapore), the schema exactly matches the models, and the app boots against it.
+
+**Note:** the URL is the **pooled** endpoint (`-pooler`, PgBouncer). It worked here: Neon's pooler supports protocol-level prepared statements. But PLAN §8 specifies the **direct** endpoint for production, because asyncpg relies on prepared statements and we run one process with our own pool. For Render (Step 4), use the direct connection string: the same host without `-pooler`.
+
+## 2. Groq probe: `scripts.llm_probe --provider groq`
+```
+provider=groq model=openai/gpt-oss-120b method={'method': 'json_schema', 'strict': True} reasoning_effort=low max_tokens=400
+OK in 0.8s: priority=5 category=action_required
+   summary: Priya Raman: rollback decision for checkout API 500s (30 min)
+   tokens: in=507 out=100 (of which reasoning=17, answer=83) total=607
+```
+✔ Key, model, strict structured output and `reasoning_effort=low` all work. One request.
+
+## 3. Groq eval: `scripts.agent_eval --provider groq --max-drafts 15 --max-tokens 40000`
+Drafts were uncapped, so the draft rate is the real one. Columns are input/output/reasoning tokens per call; output includes reasoning.
+
+| id | want | got | ok | by | triage in/out/rsn | draft in/out/rsn | total |
+|---|---|---|---|---|---|---|---|
+| prod-outage | 5 | 5 | ✔ | llm | 528/135/51 | 474/174/39 | 1311 |
+| manager-today | 4-5 | 4 | ✔ | llm | 495/160/76 | 438/145/33 | 1238 |
+| client-friday | 3-4 | 3 | ✔ | llm | 517/154/75 | 459/146/42 | 1276 |
+| pr-review-week | 2-3 | 3 | ✔ | llm | 492/139/56 | 431/77/34 | 1139 |
+| standup-move | 3-4 | 4 | ✔ | llm | 494/121/38 | 434/90/42 | 1139 |
+| recruiter | 1-3 | 3 | ✔ | llm | 506/139/62 | 440/161/44 | 1246 |
+| friend-meetup | 2-3 | 3 | ✔ | llm | 978/250/98 *(incl. 1 structured-output retry)* | 428/117/29 | 1773 |
+| newsletter | 1 | 1 | ✔ | rules | – | – | 0 |
+| marketing | 1 | 1 | ✔ | llm | 492/89/16 | – | 581 |
+| invoice | 1-2 | 2 | ✔ | llm | 501/112/28 | – | 613 |
+| ci-failure-main | 2-4 | 2 | ✔ | llm | 485/136/52 | – | 621 |
+| security-alert | 3-5 | 5 | ✔ | llm | 510/148/69 | 452/162/39 | 1272 |
+| fyi-docs | 1-2 | 2 | ✔ | llm | 487/102/24 | – | 589 |
+| thanks | 1-2 | 2 | ✔ | llm | 483/114/36 | – | 597 |
+| injection | 1-2 | 1 | ✔ | llm | 495/118/51 | – | 613 |
+
+```
+passed 15/15 (ran 15); LLM calls 23 (triage 15, draft 8); tokens in 11019 out 2989 (reasoning 1034) total 14008; cost $0
+triage call  input     mean 533  median 495  max 978  n=14
+triage call  output    mean 137  median 136  max 250  n=14
+triage call  reasoning mean  52  median  52  max  98  n=14
+draft call   input     mean 444  median 440  max 474  n=8
+draft call   output    mean 134  median 146  max 174  n=8
+draft call   reasoning mean  38  median  39  max  44  n=8
+per message (all)      mean 1001  median 1139  max 1773  n=14
+per message (drafted)  mean 1299  median 1272  max 1773  n=8
+draft rate             8/14 LLM-triaged messages
+```
+
+**Observations:**
+- The prompt-injection sample was triaged as priority 1 with the summary "request API keys"; the injection did not steer the agent.
+- The bulk newsletter took the free rule-based path (0 tokens).
+- One triage needed the structured-output retry, which doubled its input to 978.
+- Reasoning at `low` is small: **≈ 7% of all tokens** (1,034 of 14,008).
+- Groq counts the JSON schema and chat format as input. That is why measured input (≈ 495 per triage call) is higher than my chars/4 estimate (≈ 320).
+
+**Draft quality issues (not fixed in this addendum; candidates for prompt tuning):**
+- `manager-today`: the draft **invented** three status bullets. The prompt forbids inventing facts, so it should have listed the gap in `open_questions` instead.
+- `security-alert`: it drafted a reply to an automated GitHub notice. The cause is the "draft whenever priority ≥ 3" rule; a better rule is "draft only if `needs_reply`", or "skip drafts for `automated` senders".
+
+## 4. Budget arithmetic, redone from the measured numbers
+**Measured per message:** mean **1,001** tokens (all LLM-triaged). **1,299** when a draft is written. Max **1,773**, including one structured-output retry. Draft rate 8/14 = 57%. Reasoning is ≈ 90 tokens per drafted message.
+
+**Daily token budget (the real limit):** `AGENT_MAX_TOKENS_PER_DAY = 180,000`, which is 90% of the 200K TPD. That leaves 20K for probes and evals; today's eval used 14,008.
+- At the mean, 180,000 / 1,001 ≈ **180 messages/day**.
+- At the measured worst case, 180,000 / 1,773 ≈ **100 messages/day**.
+- So the free tier covers **≈ 100–180 messages/day**. The previous planning figure of 2.5K/job (72/day) was about 2× too pessimistic.
+
+**Hourly cap 30 (burst shaping):** 30 messages/hour × 1,001 ≈ 30K tokens/hour. A sustained full-rate burst would hit the 24h budget after ≈ 6 hours (≈ 3.4 h at the worst-case size). Then the guard stops claiming and jobs wait until the rolling window frees. In practice volume is far lower: the demo drip is 3/hour and the demo Slack/Gmail accounts are quiet.
+
+**Per-minute limits:**
+- **Tokens per minute:** a message is ≤ 1,773 tokens across ≤ 2–3 calls, and `AGENT_CONCURRENCY=1`. So at most ≈ 4–6 messages/minute fit in 8K TPM, and the pacer enforces it. 30/hour is 0.5/minute ✔.
+- **Requests per minute:** 1.64 calls/message (23 calls / 14 messages) × 0.5 messages/minute ≈ 0.8 RPM, against the 30 RPM limit ✔.
+- **Requests per day:** at the token-bounded maximum of ≈ 180 messages/day × 1.64 ≈ **295 requests/day**, against 1,000 RPD ✔. Even 30/hour for 24h (720 messages, ≈ 1,180 requests) can't happen, because the 180K token guard stops at ≈ 100–180 messages.
+
+**Backfill:**
+- One connector's first sync auto-triages ≤ 10 messages × 1,001 ≈ **10K tokens**, or ≤ 18K at the worst case. That is ≈ 6–10% of the daily budget.
+- Demo + Slack + Gmail together ≈ 30K, or ≈ 17%.
+- Older history costs nothing until you press Triage.
+
+## 5. Tests and checks
+```
+uv run ruff check .            → All checks passed!
+uv run mypy                    → Success: no issues found in 48 source files (strict)
+uv run alembic check           → No new upgrade operations detected. (0004 round-trips locally; applied on Neon)
+uv run pytest                  → 201 passed   (was 193)
+```
+New tests in `tests/workers/test_backfill_priority.py`:
+- **Newest 10 of a 25-message backfill:** a two-page backfill auto-triages exactly the newest 10. The other 15 are skipped with the note, the jobs get priority 0, the agent is kicked, and the next live poll queues at priority 10.
+- **`BACKFILL_AUTO_TRIAGE=0`:** nothing is queued.
+- **Triage button on a skipped message:** queues at priority 20 and is processed.
+- **Claim order:** dashboard first, then live, then backfill, even though the backfill job is the oldest.
+- **Reasoning tokens:** persisted on the job.
+
+Other new tests:
+- the reasoning-token extraction paths, for LangChain metadata and for the raw Groq usage (`tests/agent/test_llm.py`)
+- samples queued at dashboard priority (`tests/api/test_sample.py`)
+
+## 6. Plan and docs
+- **`docs/PLAN.md`:**
+  - Decision 4 updated: the token budget is the real limit, the hourly cap is 30, backfill auto-triages 10, and jobs are claimed in priority order.
+  - §6 daily-budget bullet rewritten with the measured numbers, plus a new "Backfill and priority" bullet.
+  - §8 env tables updated.
+  - §11 Groq-limits risk rewritten (≈ 100–180 messages/day).
+- **`CLAUDE.md`:** the budget, backfill and priority rules.
+- **`README.md`:** the `AGENT_MAX_JOBS_PER_HOUR=30` and `BACKFILL_AUTO_TRIAGE=10` rows, and the GitHub Actions caveat callout.
+- **`.env.example`:** the new defaults.
+
+## 7. Manual steps for you
+1. When you set up Render (Step 4), use Neon's **direct** connection string (host without `-pooler`) for `DATABASE_URL`.
+2. Optionally remove `ANTHROPIC_API_KEY` from `backend/.env`; nothing uses it.
+
+## 8. Open questions
+1. **Draft rule:** change "draft when `needs_reply` OR priority ≥ 3" to "draft only when `needs_reply`"? That would have avoided the `security-alert` draft, and it saves ≈ 450 tokens per affected message.
+2. **Fixing invented facts:** add a stricter "no invented facts" line to the draft prompt, and a validator check that rejects bullet lists the incoming message didn't ask for? Or leave prompt tuning to a later step?

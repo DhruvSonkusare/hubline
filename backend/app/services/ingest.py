@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.connectors.models import NormalizedMessage
 from app.models import ConnectorAccount, Message, Thread
 from app.models.message import BODY_MAX_CHARS
-from app.services.jobs import enqueue_triage
+from app.services.jobs import BACKFILL_SKIP_NOTE, PRIORITY_LIVE, enqueue_triage
 
 RAW_MAX_BYTES = 64_000
 
@@ -37,9 +37,19 @@ async def ingest_messages(
     session: AsyncSession,
     account: ConnectorAccount,
     messages: Sequence[NormalizedMessage],
+    *,
+    backfill: bool = False,
+    job_priority: int = PRIORITY_LIVE,
 ) -> IngestResult:
+    """Store messages and (unless `backfill`) queue triage for new inbound ones.
+
+    backfill=True (a connector's first sync): every message is stored, but inbound ones are
+    marked agent_status='skipped' and NOT queued; the caller then promotes only the newest
+    BACKFILL_AUTO_TRIAGE of them (services.jobs.promote_newest_backfill) at lowest priority.
+    """
     result = IngestResult()
     self_ids = set(account.self_ids or ())
+    inbound_status = "skipped" if backfill else "pending"
 
     for msg in sorted(messages, key=lambda m: m.received_at):
         if msg.source != account.source:
@@ -70,7 +80,8 @@ async def ingest_messages(
                 raw=_trim_raw(msg.raw),
                 is_demo=msg.is_demo or account.is_demo,
                 # outbound rows never go to the agent
-                agent_status="pending" if direction == "inbound" else "skipped",
+                agent_status=inbound_status if direction == "inbound" else "skipped",
+                agent_error=BACKFILL_SKIP_NOTE if backfill and direction == "inbound" else None,
             )
             .on_conflict_do_nothing(index_elements=["source", "external_id"])
             .returning(Message.id)
@@ -96,8 +107,11 @@ async def ingest_messages(
                 .values(status="replied", status_changed_at=func.now())
             )
 
-    # Same transaction as the inserts: a committed message always has its triage job.
-    result.jobs_enqueued = await enqueue_triage(session, result.new_inbound_ids)
+    # Same transaction as the inserts: a committed live message always has its triage job.
+    if not backfill:
+        result.jobs_enqueued = await enqueue_triage(
+            session, result.new_inbound_ids, priority=job_priority
+        )
     return result
 
 

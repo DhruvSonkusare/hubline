@@ -56,7 +56,7 @@ _CLAIM_SQL = text(
         WHERE id IN (
             SELECT id FROM agent_jobs
             WHERE status = 'pending' AND run_after <= now()
-            ORDER BY run_after, id
+            ORDER BY priority DESC, run_after, id
             LIMIT :limit
             FOR UPDATE SKIP LOCKED
         )
@@ -492,5 +492,6 @@ def _token_values(usage: Usage | None) -> dict[str, Any]:
     return {
         "input_tokens": AgentJob.input_tokens + usage.input_tokens,
         "output_tokens": AgentJob.output_tokens + usage.output_tokens,
+        "reasoning_tokens": AgentJob.reasoning_tokens + usage.reasoning_tokens,
         "llm_calls": AgentJob.llm_calls + usage.calls,
     }

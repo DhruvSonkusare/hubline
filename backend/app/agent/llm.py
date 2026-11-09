@@ -77,19 +77,24 @@ class LLMRateLimitError(LLMError):
 
 @dataclass
 class Usage:
+    """Token counts as reported by the provider. `output_tokens` INCLUDES reasoning tokens
+    (OpenAI/Groq convention); `reasoning_tokens` is the reasoning share of them."""
+
     calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    reasoning_tokens: int = 0
     by_model: dict[str, list[int]] = field(default_factory=dict)  # model -> [in, out]
 
     @property
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
 
-    def add(self, model: str, input_tokens: int, output_tokens: int) -> None:
+    def add(self, model: str, input_tokens: int, output_tokens: int, reasoning: int = 0) -> None:
         self.calls += 1
         self.input_tokens += input_tokens
         self.output_tokens += output_tokens
+        self.reasoning_tokens += reasoning
         acc = self.by_model.setdefault(model, [0, 0])
         acc[0] += input_tokens
         acc[1] += output_tokens
@@ -99,11 +104,27 @@ class Usage:
 job_usage: contextvars.ContextVar[Usage | None] = contextvars.ContextVar("job_usage", default=None)
 
 
-def record_usage(model: str, input_tokens: int, output_tokens: int, own: Usage) -> None:
-    own.add(model, input_tokens, output_tokens)
+def record_usage(
+    model: str, input_tokens: int, output_tokens: int, own: Usage, reasoning: int = 0
+) -> None:
+    own.add(model, input_tokens, output_tokens, reasoning)
     current = job_usage.get()
     if current is not None and current is not own:
-        current.add(model, input_tokens, output_tokens)
+        current.add(model, input_tokens, output_tokens, reasoning)
+
+
+def reasoning_tokens_from(usage: dict[str, Any], meta: dict[str, Any]) -> int:
+    """Reasoning tokens: LangChain's usage_metadata.output_token_details.reasoning, falling back
+    to the raw provider usage (Groq/OpenAI: completion_tokens_details.reasoning_tokens)."""
+    details = usage.get("output_token_details") or {}
+    value = details.get("reasoning")
+    if not value:
+        raw_usage = meta.get("token_usage") or meta.get("usage") or {}
+        value = (raw_usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 class StructuredLLM(Protocol):
@@ -325,12 +346,14 @@ class LangChainLLM:
 
         raw, parsed, parsing_error = out.get("raw"), out.get("parsed"), out.get("parsing_error")
         usage = getattr(raw, "usage_metadata", None) or {}
+        meta = getattr(raw, "response_metadata", None) or {}
         tin, tout = int(usage.get("input_tokens", 0)), int(usage.get("output_tokens", 0))
-        record_usage(self.model_name, tin, tout, self.usage)
+        record_usage(
+            self.model_name, tin, tout, self.usage, reasoning_tokens_from(dict(usage), meta)
+        )
         if entry is not None:
             RateLimiter.settle(entry, tin + tout or est_tokens)
 
-        meta = getattr(raw, "response_metadata", None) or {}
         stop = meta.get("stop_reason") or meta.get("finish_reason")
         if stop == "refusal":
             raise LLMRefusalError("model declined")

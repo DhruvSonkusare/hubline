@@ -47,7 +47,8 @@ def test_llm_defaults_are_free() -> None:
     assert fields["llm_effort"].default == "low"
     assert fields["llm_max_retries"].default == 0  # 429s reach the worker -> job deferred
     assert (fields["llm_rpm"].default, fields["llm_tpm"].default) == (30, 8000)
-    assert fields["agent_max_jobs_per_hour"].default == 3
+    assert fields["agent_max_jobs_per_hour"].default == 30  # bursts; token budget is the limit
+    assert fields["backfill_auto_triage"].default == 10
     assert fields["agent_max_tokens_per_day"].default == 180_000
     assert fields["agent_concurrency"].default == 1
     s = make_settings()

@@ -15,6 +15,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Any
 
 import httpx
 import structlog
@@ -27,6 +28,7 @@ from app.connectors.base import AuthExpiredError, RateLimitedError
 from app.models import ConnectorAccount, SyncState
 from app.services.connector_runtime import build_connector, pollable_sources
 from app.services.ingest import ingest_messages
+from app.services.jobs import promote_newest_backfill
 from app.workers.supervisor import sleep_or_wake
 
 log = structlog.get_logger(__name__)
@@ -143,6 +145,10 @@ class Scheduler:
 
         cursor = claim.cursor
         inserted = 0
+        # First sync (no cursor yet) = backfill: store everything, auto-triage only the newest
+        # BACKFILL_AUTO_TRIAGE afterwards (lowest priority), so history can't drain the budget.
+        backfill = claim.cursor is None
+        backfilled: list[uuid.UUID] = []
         try:
             connector = build_connector(account, self.settings, self.http)
             for _page in range(self.settings.max_pages_per_poll):
@@ -150,7 +156,10 @@ class Scheduler:
                     connector.fetch_new(cursor), timeout=self.settings.poll_timeout_s
                 )
                 async with self.sessionmaker() as session, session.begin():
-                    ingested = await ingest_messages(session, account, result.messages)
+                    ingested = await ingest_messages(
+                        session, account, result.messages, backfill=backfill
+                    )
+                    backfilled += ingested.new_inbound_ids if backfill else []
                     if result.cursor is not None:
                         cursor = result.cursor
                     await session.execute(
@@ -182,7 +191,25 @@ class Scheduler:
         else:
             await self._record_success(claim, interval)
             if inserted:
-                plog.info("poll_ingested", inserted=inserted)
+                plog.info("poll_ingested", inserted=inserted, backfill=backfill)
+        finally:
+            # Also after a failed later page: pages already committed get their newest N queued.
+            if backfilled:
+                await self._promote_backfill(backfilled, plog)
+
+    async def _promote_backfill(self, message_ids: list[uuid.UUID], plog: Any) -> None:
+        async with self.sessionmaker() as session, session.begin():
+            queued = await promote_newest_backfill(
+                session, message_ids, self.settings.backfill_auto_triage
+            )
+        plog.info(
+            "backfill_triage_queued",
+            backfilled=len(message_ids),
+            queued=queued,
+            skipped=len(message_ids) - queued,
+        )
+        if queued and self.on_new_jobs is not None:
+            self.on_new_jobs()
 
     async def _record_success(self, claim: Claim, interval: float) -> None:
         async with self.sessionmaker() as session, session.begin():

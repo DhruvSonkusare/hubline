@@ -63,3 +63,16 @@ async def test_connector_without_sample_capability(
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "not_supported"
     assert (await app_client.post("/api/connectors/nope/sample")).status_code == 404
+
+
+async def test_sample_job_has_dashboard_priority(
+    app_client: httpx.AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    from app.services.jobs import PRIORITY_USER
+
+    r = await app_client.post("/api/connectors/demo/sample")
+    async with sessionmaker() as s:
+        job = (
+            await s.execute(select(AgentJob).where(AgentJob.message_id == r.json()["message_id"]))
+        ).scalar_one()
+    assert job.priority == PRIORITY_USER

@@ -75,9 +75,21 @@ async def main(args: argparse.Namespace) -> int:
         f"provider={provider} model={model} effort={settings.llm_effort} "
         f"token cap={args.max_tokens} pacing={settings.llm_rpm} rpm/{settings.llm_tpm} tpm"
     )
-    print(f"{'id':<16} {'want':<6} {'got':<4} {'ok':<3} {'by':<6} {'tokens':>6}  summary")
+    print(
+        f"{'id':<16} {'want':<5} {'got':<3} {'ok':<3} {'by':<5} "
+        f"{'tri in/out/rsn':>15} {'draft in/out/rsn':>17} {'total':>6}  summary"
+    )
     passed, drafts_done, ran = 0, 0, 0
     drafted: list[tuple[str, str]] = []
+    per_message: list[dict[str, int]] = []  # measured tokens per message (for the budget maths)
+
+    def snap() -> tuple[int, ...]:
+        t, d = triage_llm.usage, draft_llm.usage
+        return (
+            t.calls, t.input_tokens, t.output_tokens, t.reasoning_tokens,
+            d.calls, d.input_tokens, d.output_tokens, d.reasoning_tokens,
+        )  # fmt: skip
+
     for sample in samples:
         if used() + TRIAGE_RESERVE_TOKENS > args.max_tokens:
             print(f"-- token cap reached ({used()}); stopping before {sample['id']}")
@@ -85,7 +97,7 @@ async def main(args: argparse.Namespace) -> int:
         allow_draft = (
             drafts_done < args.max_drafts and used() + DRAFT_RESERVE_TOKENS <= args.max_tokens
         )
-        before = used()
+        before = snap()
         out: Any = None
         for attempt in (1, 2):
             state = initial_state(
@@ -111,10 +123,20 @@ async def main(args: argparse.Namespace) -> int:
         ok = got is not None and lo <= got <= hi
         passed += ok
         band = f"{lo}-{hi}" if lo != hi else str(lo)
-        summary = (t.summary if t else out.get("skip_reason") or "")[:60]
+        summary = (t.summary if t else out.get("skip_reason") or "")[:48]
+        delta = [a - b for a, b in zip(snap(), before, strict=True)]
+        m = {
+            "tri_calls": delta[0], "tri_in": delta[1], "tri_out": delta[2], "tri_rsn": delta[3],
+            "dr_calls": delta[4], "dr_in": delta[5], "dr_out": delta[6], "dr_rsn": delta[7],
+        }  # fmt: skip
+        m["total"] = m["tri_in"] + m["tri_out"] + m["dr_in"] + m["dr_out"]
+        if m["tri_calls"] or m["dr_calls"]:
+            per_message.append(m)
+        tri = f"{m['tri_in']}/{m['tri_out']}/{m['tri_rsn']}" if m["tri_calls"] else "-"
+        dr = f"{m['dr_in']}/{m['dr_out']}/{m['dr_rsn']}" if m["dr_calls"] else "-"
         print(
-            f"{sample['id']:<16} {band:<6} {got!s:<4} {'ok' if ok else 'NO':<3} "
-            f"{out.get('triage_by') or '-':<6} {used() - before:>6}  {summary}"
+            f"{sample['id']:<16} {band:<5} {got!s:<3} {'ok' if ok else 'NO':<3} "
+            f"{out.get('triage_by') or '-':<5} {tri:>15} {dr:>17} {m['total']:>6}  {summary}"
         )
         draft = out.get("draft")
         if draft is not None:
@@ -129,9 +151,38 @@ async def main(args: argparse.Namespace) -> int:
     print(
         f"passed {passed}/{len(samples)} (ran {ran}); LLM calls {u_t.calls + u_d.calls} "
         f"(triage {u_t.calls}, draft {u_d.calls}); tokens in {u_t.input_tokens + u_d.input_tokens}"
-        f" out {u_t.output_tokens + u_d.output_tokens} total {used()}; cost $0 (free tier)"
+        f" out {u_t.output_tokens + u_d.output_tokens} (reasoning "
+        f"{u_t.reasoning_tokens + u_d.reasoning_tokens}) total {used()}; cost $0 (free tier)"
     )
+    print_token_stats(per_message)
     return 0 if passed >= args.min_pass else 1
+
+
+def print_token_stats(rows: list[dict[str, int]]) -> None:
+    """Measured per-call and per-message token statistics (input for the budget arithmetic)."""
+    if not rows:
+        return
+
+    def stat(values: list[int]) -> str:
+        if not values:
+            return "n/a"
+        v = sorted(values)
+        return (
+            f"mean {sum(v) / len(v):7.0f}  median {v[len(v) // 2]:6d}  max {v[-1]:6d}  n={len(v)}"
+        )
+
+    tri = [r for r in rows if r["tri_calls"]]
+    dr = [r for r in rows if r["dr_calls"]]
+    print("\n--- measured tokens")
+    print(f"triage call  input     {stat([r['tri_in'] for r in tri])}")
+    print(f"triage call  output    {stat([r['tri_out'] for r in tri])}")
+    print(f"triage call  reasoning {stat([r['tri_rsn'] for r in tri])}")
+    print(f"draft call   input     {stat([r['dr_in'] for r in dr])}")
+    print(f"draft call   output    {stat([r['dr_out'] for r in dr])}")
+    print(f"draft call   reasoning {stat([r['dr_rsn'] for r in dr])}")
+    print(f"per message (all)      {stat([r['total'] for r in rows])}")
+    print(f"per message (drafted)  {stat([r['total'] for r in dr])}")
+    print(f"draft rate             {len(dr)}/{len(rows)} LLM-triaged messages")
 
 
 if __name__ == "__main__":
