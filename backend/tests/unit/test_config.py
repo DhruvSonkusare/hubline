@@ -21,12 +21,16 @@ def test_production_requires_long_tokens() -> None:
 
 
 def test_defaults_are_idle_friendly_and_demo_off() -> None:
-    s = make_settings()
-    assert s.scheduler_idle_max_s == 60
-    assert s.worker_idle_max_s == 60
     from app.config import Settings
 
-    assert Settings.model_fields["demo_mode"].default is False
+    fields = Settings.model_fields
+    # above Neon's 5-minute suspend delay, so an idle app lets the database scale to zero
+    assert fields["scheduler_idle_max_s"].default > 300
+    assert fields["worker_idle_max_s"].default > 300
+    assert fields["demo_mode"].default is False
+    assert fields["work_on_demand"].default is True
+    assert fields["tick_secret"].default is None  # /internal/tick disabled unless configured
+    assert fields["tick_on_startup"].default is False
 
 
 def test_connector_allowlist() -> None:
@@ -34,13 +38,21 @@ def test_connector_allowlist() -> None:
     assert make_settings(connectors_enabled="demo, slack").connector_allowlist == {"demo", "slack"}
 
 
-def test_llm_defaults_are_offline_and_cheap() -> None:
+def test_llm_defaults_are_free() -> None:
+    from app.config import Settings
+
+    fields = Settings.model_fields
+    assert fields["llm_provider"].default == "fake"  # local dev + tests: offline, $0
+    assert fields["llm_model"].default == "openai/gpt-oss-120b"  # Groq free tier in production
+    assert fields["llm_effort"].default == "low"
+    assert fields["llm_max_retries"].default == 0  # 429s reach the worker -> job deferred
+    assert (fields["llm_rpm"].default, fields["llm_tpm"].default) == (30, 8000)
+    assert fields["agent_max_jobs_per_hour"].default == 3
+    assert fields["agent_max_tokens_per_day"].default == 180_000
+    assert fields["agent_concurrency"].default == 1
     s = make_settings()
-    assert s.llm_provider == "fake"
-    assert s.llm_effort == "low"
-    assert s.draft_model == s.llm_model == "claude-haiku-5-5"
-    assert make_settings(llm_draft_model="claude-sonnet-5-5").draft_model == "claude-sonnet-5-5"
-    assert s.agent_max_jobs_per_hour == 30
+    assert s.draft_model == s.llm_model
+    assert make_settings(llm_draft_model="other").draft_model == "other"
 
 
 def test_retry_delays_parsed_and_validated() -> None:

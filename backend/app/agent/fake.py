@@ -14,7 +14,7 @@ from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel
 
-from app.agent.llm import LLMOutputError, Usage
+from app.agent.llm import LLMOutputError, Usage, record_usage
 from app.agent.schemas import DraftResult, TriageResult
 
 T = TypeVar("T", bound=BaseModel)
@@ -60,20 +60,24 @@ class FakeLLM:
 
     async def generate(self, schema: type[T], *, system: str, prompt: str, max_tokens: int) -> T:
         self.calls.append(FakeCall(schema.__name__, system, prompt))
-        self.usage.add(self.model_name, len(system + prompt) // 4, 50)
         queued = self.script.get(schema)
+        result: Any
         if queued:
             item = queued.pop(0)
             if isinstance(item, BaseException):
-                raise item
+                raise item  # like a real provider: a failed call reports no usage
             if not isinstance(item, schema):
                 raise LLMOutputError(f"scripted {type(item).__name__} for {schema.__name__}")
-            return item
-        if schema is TriageResult:
-            return cast(T, _heuristic_triage(system, prompt))
-        if schema is DraftResult:
-            return cast(T, _heuristic_draft(system, prompt))
-        raise LLMOutputError(f"fake LLM has no heuristic for {schema.__name__}")
+            result = item
+        elif schema is TriageResult:
+            result = _heuristic_triage(system, prompt)
+        elif schema is DraftResult:
+            result = _heuristic_draft(system, prompt)
+        else:
+            raise LLMOutputError(f"fake LLM has no heuristic for {schema.__name__}")
+        # ~4 chars per token in, a fixed 50 out; also attributed to the current job
+        record_usage(self.model_name, len(system + prompt) // 4, 50, self.usage)
+        return cast(T, result)
 
 
 def _parts(prompt: str) -> tuple[str, str, str]:

@@ -1,11 +1,13 @@
-"""Run the triage (and a few drafts) against tests/fixtures/agent/samples.yaml with the REAL
-model configured in backend/.env, with a hard spend cap.
+"""Run triage (and a few drafts) on tests/fixtures/agent/samples.yaml with a REAL free-tier model,
+capped in TOKENS so it never eats the daily free allowance.
 
-    uv run python -m scripts.agent_eval                 # needs LLM_PROVIDER=anthropic + key
-    uv run python -m scripts.agent_eval --budget 0.05 --max-drafts 4
-    uv run python -m scripts.agent_eval --allow-fake    # dry run with the offline fake model
+    uv run python -m scripts.agent_eval --provider groq          # needs GROQ_API_KEY in .env
+    uv run python -m scripts.agent_eval --provider google_genai --model gemini-3.5-flash-lite
+    uv run python -m scripts.agent_eval --allow-fake             # offline dry run
 
-No database is used. Exit code 0 when at least --min-pass samples land in their expected band.
+Calls are paced by the client-side RPM/TPM limiter (LLM_RPM / LLM_TPM); a provider 429 waits
+retry-after and retries the sample once. No database is used. Exit code 0 when at least
+--min-pass samples land in their expected priority band.
 """
 
 from __future__ import annotations
@@ -20,33 +22,15 @@ from typing import Any
 import yaml
 
 from app.agent.graph import build_graph, run_agent
-from app.agent.llm import StructuredLLM, build_llm
+from app.agent.llm import LLMRateLimitError, build_llm
 from app.agent.state import MessageForAgent, OwnerProfile, initial_state
 from app.config import Settings
 
 SAMPLES = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "agent" / "samples.yaml"
-
-# USD per million tokens (input, output) - Anthropic list prices, Oct 2026.
-PRICES: dict[str, tuple[float, float]] = {
-    "claude-haiku-5-5": (0.10, 0.50),
-    "claude-sonnet-5-5": (2.00, 10.00),
-    "claude-opus-5-5": (4.00, 20.00),
-}
-FALLBACK_PRICE = (10.00, 50.00)  # unknown model: assume the most expensive tier
-# Worst-case reserve before each call, so the cap is never crossed.
-TRIAGE_RESERVE_USD = 0.003
-DRAFT_RESERVE_USD = 0.02
-
-
-def cost(llms: list[StructuredLLM]) -> float:
-    total = 0.0
-    for llm in llms:
-        for model, (tin, tout) in llm.usage.by_model.items():
-            pin, pout = (
-                (0.0, 0.0) if model.startswith("fake") else PRICES.get(model, FALLBACK_PRICE)
-            )
-            total += tin / 1e6 * pin + tout / 1e6 * pout
-    return total
+DEFAULT_MODELS = {"groq": "openai/gpt-oss-120b", "google_genai": "gemini-3.5-flash-lite"}
+TRIAGE_RESERVE_TOKENS = 1_500  # worst case for one triage; stop before crossing the cap
+DRAFT_RESERVE_TOKENS = 2_000
+MAX_RATE_LIMIT_WAIT_S = 90.0
 
 
 def to_message(sample: dict[str, Any]) -> MessageForAgent:
@@ -66,10 +50,13 @@ def to_message(sample: dict[str, Any]) -> MessageForAgent:
 
 
 async def main(args: argparse.Namespace) -> int:
-    settings = Settings()
-    if settings.llm_provider == "fake" and not args.allow_fake:
-        print("LLM_PROVIDER is 'fake'. Set LLM_PROVIDER=anthropic and ANTHROPIC_API_KEY in")
-        print("backend/.env to evaluate the real model, or pass --allow-fake for a dry run.")
+    base = Settings()
+    provider = args.provider or base.llm_provider
+    model = args.model or DEFAULT_MODELS.get(provider, base.llm_model)
+    settings = base.model_copy(update={"llm_provider": provider, "llm_model": model})
+    if provider == "fake" and not args.allow_fake:
+        print("Provider is 'fake'. Pass --provider groq (GROQ_API_KEY in backend/.env) or")
+        print("--provider google_genai (GOOGLE_API_KEY), or --allow-fake for a dry run.")
         return 2
     samples = yaml.safe_load(SAMPLES.read_text(encoding="utf-8"))
     triage_llm, draft_llm = build_llm(settings, "triage"), build_llm(settings, "draft")
@@ -80,39 +67,54 @@ async def main(args: argparse.Namespace) -> int:
         timezone=settings.owner_timezone,
         vips=settings.vip_senders,
     )
+
+    def used() -> int:
+        return triage_llm.usage.total_tokens + draft_llm.usage.total_tokens
+
     print(
-        f"provider={settings.llm_provider} triage={triage_llm.model_name} "
-        f"draft={draft_llm.model_name} effort={settings.llm_effort} budget=${args.budget:.3f}"
+        f"provider={provider} model={model} effort={settings.llm_effort} "
+        f"token cap={args.max_tokens} pacing={settings.llm_rpm} rpm/{settings.llm_tpm} tpm"
     )
-    print(f"{'id':<16} {'want':<6} {'got':<4} {'ok':<3} {'by':<6} summary")
+    print(f"{'id':<16} {'want':<6} {'got':<4} {'ok':<3} {'by':<6} {'tokens':>6}  summary")
     passed, drafts_done, ran = 0, 0, 0
     drafted: list[tuple[str, str]] = []
     for sample in samples:
-        spent = cost([triage_llm, draft_llm])
-        if spent + TRIAGE_RESERVE_USD > args.budget:
-            print(f"-- budget reached (${spent:.4f}); stopping before {sample['id']}")
+        if used() + TRIAGE_RESERVE_TOKENS > args.max_tokens:
+            print(f"-- token cap reached ({used()}); stopping before {sample['id']}")
             break
-        allow_draft = drafts_done < args.max_drafts and spent + DRAFT_RESERVE_USD <= args.budget
-        state = initial_state(
-            job_kind="triage", message=to_message(sample), owner=owner, allow_draft=allow_draft
+        allow_draft = (
+            drafts_done < args.max_drafts and used() + DRAFT_RESERVE_TOKENS <= args.max_tokens
         )
-        try:
-            out = await run_agent(graph, state)
-        except Exception as exc:
-            print(f"{sample['id']:<16} ERROR {type(exc).__name__}: {exc}")
-            ran += 1
-            continue
+        before = used()
+        out: Any = None
+        for attempt in (1, 2):
+            state = initial_state(
+                job_kind="triage", message=to_message(sample), owner=owner, allow_draft=allow_draft
+            )
+            try:
+                out = await run_agent(graph, state)
+                break
+            except LLMRateLimitError as exc:
+                if attempt == 2 or exc.retry_after > MAX_RATE_LIMIT_WAIT_S:
+                    print(f"{sample['id']:<16} RATE-LIMITED (retry after {exc.retry_after:.0f}s)")
+                    break
+                await asyncio.sleep(exc.retry_after)
+            except Exception as exc:
+                print(f"{sample['id']:<16} ERROR {type(exc).__name__}: {exc}")
+                break
         ran += 1
+        if out is None:
+            continue
         lo, hi = sample["expected"]
         t = out.get("triage")
         got = t.priority if t else None
         ok = got is not None and lo <= got <= hi
         passed += ok
         band = f"{lo}-{hi}" if lo != hi else str(lo)
-        summary = (t.summary if t else out.get("skip_reason") or "")[:70]
+        summary = (t.summary if t else out.get("skip_reason") or "")[:60]
         print(
             f"{sample['id']:<16} {band:<6} {got!s:<4} {'ok' if ok else 'NO':<3} "
-            f"{out.get('triage_by') or '-':<6} {summary}"
+            f"{out.get('triage_by') or '-':<6} {used() - before:>6}  {summary}"
         )
         draft = out.get("draft")
         if draft is not None:
@@ -123,12 +125,11 @@ async def main(args: argparse.Namespace) -> int:
         print("\n--- drafts")
         for sid, body in drafted:
             print(f"[{sid}]\n{body}\n")
-    usage = [triage_llm.usage, draft_llm.usage]
+    u_t, u_d = triage_llm.usage, draft_llm.usage
     print(
-        f"passed {passed}/{len(samples)} (ran {ran}); LLM calls "
-        f"{sum(u.calls for u in usage)}; tokens in {sum(u.input_tokens for u in usage)} "
-        f"out {sum(u.output_tokens for u in usage)}; "
-        f"estimated cost ${cost([triage_llm, draft_llm]):.4f}"
+        f"passed {passed}/{len(samples)} (ran {ran}); LLM calls {u_t.calls + u_d.calls} "
+        f"(triage {u_t.calls}, draft {u_d.calls}); tokens in {u_t.input_tokens + u_d.input_tokens}"
+        f" out {u_t.output_tokens + u_d.output_tokens} total {used()}; cost $0 (free tier)"
     )
     return 0 if passed >= args.min_pass else 1
 
@@ -137,7 +138,9 @@ if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")  # Windows consoles default to cp1252
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--budget", type=float, default=0.05, help="hard cap in USD")
+    parser.add_argument("--provider")
+    parser.add_argument("--model")
+    parser.add_argument("--max-tokens", type=int, default=40_000, help="hard cap for this run")
     parser.add_argument("--max-drafts", type=int, default=4)
     parser.add_argument("--min-pass", type=int, default=12)
     parser.add_argument("--allow-fake", action="store_true")

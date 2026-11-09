@@ -44,12 +44,19 @@ class Settings(DatabaseSettings):
     public_base_url: str = "http://localhost:8000"
     frontend_url: str = "http://localhost:3000"
 
-    # --- Background work (R3: idle-friendly, switchable)
+    # --- Background work (R3: idle-friendly, switchable). Idle sleeps default above Neon's
+    #     5-minute suspend delay so an idle app lets the database scale to zero.
+    #     On Render free (production) both loops are OFF: work runs via /internal/tick,
+    #     TICK_ON_STARTUP and on-demand kicks from API actions (see app/workers/runner.py).
     enable_scheduler: bool = True
     enable_agent_worker: bool = True
     scheduler_min_sleep_s: float = Field(default=1.0, gt=0)
-    scheduler_idle_max_s: float = Field(default=60.0, gt=0)
-    worker_idle_max_s: float = Field(default=60.0, gt=0)
+    scheduler_idle_max_s: float = Field(default=600.0, gt=0)
+    worker_idle_max_s: float = Field(default=600.0, gt=0)
+    work_on_demand: bool = True  # loops off: API actions run one scheduler/agent pass
+    tick_secret: SecretStr | None = None  # enables POST /internal/tick (X-Tick-Secret header)
+    tick_budget_s: float = Field(default=60.0, gt=0, le=600)  # max agent drain per tick
+    tick_on_startup: bool = False  # run one tick when the process starts (Render cold start)
     scheduler_batch_size: int = Field(default=5, ge=1, le=50)
     poll_lease_s: int = Field(default=120, ge=10)
     poll_timeout_s: float = Field(default=60.0, gt=0)
@@ -65,25 +72,40 @@ class Settings(DatabaseSettings):
     # --- Owner
     owner_timezone: str = "Asia/Kolkata"
 
-    # --- LLM (Step 2). "fake" = deterministic offline model (default: never spends money);
-    #     "anthropic" = official Anthropic SDK; anything else = LangChain init_chat_model provider.
+    # --- LLM. Every provider goes through LangChain init_chat_model.
+    #     "fake" (default) = deterministic offline model for local dev and tests ($0, no key).
+    #     "groq" = production default (free tier). "google_genai" = Gemini free tier (demo data
+    #     only: free-tier prompts may be used by Google). "anthropic" = optional, paid
+    #     (`uv sync --extra anthropic`). Any other init_chat_model provider also works.
     llm_provider: str = "fake"
-    llm_model: str = "claude-haiku-5-5"  # triage
+    llm_model: str = "openai/gpt-oss-120b"  # triage
     llm_draft_model: str | None = None  # drafts; defaults to llm_model
-    llm_effort: Literal["low", "medium", "high"] = "low"  # Anthropic output_config.effort
+    llm_effort: Literal["low", "medium", "high"] = "low"  # reasoning effort where supported
+    llm_temperature: float | None = None  # None = provider default (never sent to Anthropic)
+    llm_structured_method: Literal["auto", "json_schema", "function_calling", "json_mode"] = "auto"
     llm_timeout_s: float = Field(default=60.0, gt=0)
-    llm_max_retries: int = Field(default=3, ge=0, le=10)  # transport retries (429/5xx/network)
+    # 0: surface 429s immediately so the job is deferred with retry-after (never failed).
+    llm_max_retries: int = Field(default=0, ge=0, le=10)
+    # Client-side pacing per model (free-tier limits of the default Groq model). 0 = off.
+    llm_rpm: int = Field(default=30, ge=0)
+    llm_tpm: int = Field(default=8000, ge=0)
+    groq_api_key: SecretStr | None = None
+    google_api_key: SecretStr | None = None
     anthropic_api_key: SecretStr | None = None
 
     # --- Agent worker
-    agent_concurrency: int = Field(default=2, ge=1, le=10)
-    agent_max_jobs_per_hour: int = Field(default=30, ge=0)  # budget guard; 0 = pause the agent
+    agent_concurrency: int = Field(default=1, ge=1, le=10)
+    # Budget guards (free tier): see reports/step-2-report.md for the arithmetic.
+    agent_max_jobs_per_hour: int = Field(default=3, ge=0)  # 0 = pause the agent
+    agent_max_tokens_per_day: int = Field(default=180_000, ge=0)  # rolling 24h; 0 = off
+    agent_body_chars: int = Field(default=2000, ge=200)  # message text sent to the LLM
+    agent_thread_item_chars: int = Field(default=300, ge=50)
     agent_retry_delays_s: str = "30,120,600"  # wait before attempt 2, 3, ...
     agent_job_timeout_s: float = Field(default=180.0, gt=0)
     agent_stale_after_s: int = Field(default=600, ge=60)  # running longer than this = crashed
     agent_maintenance_interval_s: int = Field(default=900, ge=60)
     worker_min_sleep_s: float = Field(default=2.0, gt=0)
-    agent_thread_context: int = Field(default=8, ge=0, le=50)
+    agent_thread_context: int = Field(default=3, ge=0, le=50)
     agent_owner_name: str = "Dhruv Sonkusare"
     agent_owner_context: str = "Python backend developer"
     agent_vip_senders: str = ""  # comma list of sender ids / emails

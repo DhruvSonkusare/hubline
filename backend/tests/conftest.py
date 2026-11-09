@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
@@ -54,6 +54,14 @@ def make_settings(**overrides: Any) -> Settings:
         "enable_scheduler": False,
         "enable_agent_worker": False,
         "demo_mode": False,
+        # deterministic tests: no background kicks, no pacing, budgets out of the way
+        # (tests that exercise these set them explicitly)
+        "work_on_demand": False,
+        "llm_rpm": 0,
+        "llm_tpm": 0,
+        "agent_concurrency": 2,
+        "agent_max_jobs_per_hour": 1000,
+        "agent_max_tokens_per_day": 0,
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)  # type: ignore[call-arg]
@@ -206,3 +214,12 @@ def msg(
         received_at=received_at or datetime(2026, 11, 9, 10, n % 60, tzinfo=UTC),
         **extra,
     )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_rate_limiters() -> Iterator[None]:
+    from app.agent.llm import reset_limiters
+
+    reset_limiters()
+    yield
+    reset_limiters()

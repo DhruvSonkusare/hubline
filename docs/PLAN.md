@@ -1,6 +1,7 @@
 # Unified Alerts Hub (repo: `Hubline`) — Project Plan
 
-> **Status: APPROVED (2026-11-09) with revisions R1–R5 below.** This file is `docs/PLAN.md`, the source of truth.
+> **Status: APPROVED (2026-11-09) with revisions R1–R10 below.** This file is `docs/PLAN.md`, the source of truth.
+> **Hard requirement (R6): the whole project runs at $0.** No paid service, plan or API is used anywhere.
 > Any change to it is recorded in the step report that makes the change.
 
 ## Revisions agreed at approval
@@ -12,6 +13,11 @@
 | R3 | **Idle-friendly from Step 1.** The scheduler (and the agent worker from Step 2) back off to `*_IDLE_MAX_S` (default 60s) when there is no work. `ENABLE_SCHEDULER` and `ENABLE_AGENT_WORKER` work from day one. |
 | R4 | **`DEMO_MODE` defaults to false.** The demo connector is switched on or off like any other connector (`PATCH /api/connectors/demo`, and the Connectors page from Step 3). Its rows always carry `is_demo=true` and show a DEMO badge. With `DEMO_MODE=true`, the demo connector starts enabled the first time it is registered; this is a local-dev convenience only. |
 | R5 | **Root `CLAUDE.md`** holds the fixed tech decisions, the key choices, the stop-after-each-step rule and the step report template. |
+| R6 | **$0 everywhere.** Production uses only free tiers: Render Free (backend), Vercel Hobby (frontend), Neon Free (Postgres), Groq free tier (LLM), GitHub Actions on a public repo (cron). Paid options are not part of the plan. |
+| R7 | **LLM through LangChain only.** `init_chat_model` for every provider. The default production provider is **Groq** (`openai/gpt-oss-120b`, strict JSON-schema structured output). **Gemini** (`google_genai`, `gemini-3.5-flash-lite`) is the second free provider, for demo accounts only. `LLM_PROVIDER=fake` stays the default for local dev and tests. Anthropic is an optional extra (`uv sync --extra anthropic`) and is not used by the plan. The direct Anthropic SDK path is removed. |
+| R8 | **Free-tier rate limits are respected.** A client-side RPM/TPM pacer runs per model. A provider 429 **defers** the job by `retry-after`; it never fails it. A rolling 24h token budget is read from `agent_jobs` token columns (migration `0003`). Prompts are clipped so one message costs about 1–3K tokens. Budget arithmetic is in `reports/step-2-report.md`. |
+| R9 | **Render Free sleeps after 15 idle minutes, so production runs with no background loops.**<ul><li>An external free cron calls `POST /internal/tick` (header `X-Tick-Secret`) every 30 minutes. Each tick runs one scheduler pass and drains agent jobs for at most 60s.</li><li>The app also ticks once on boot (`TICK_ON_STARTUP`).</li><li>API actions (enable/sync a connector, generate a sample, later webhooks) kick one pass in the background (`WORK_ON_DEMAND`).</li><li>Slack events that hit a sleeping instance rely on Slack's retries (§8).</li></ul> |
+| R10 | **Neon Free** gives 100 CU-hours/month and suspends after 5 idle minutes. Idle sleeps default to 600s (above 300s). In production no loop queries the DB at all, so it sleeps between ticks. The estimate is about 47 CU-hours/month (§8), and it must stay well under 100. |
 
 ## Decisions (answers to the §12 questions)
 
@@ -20,19 +26,22 @@
 | 1 | Login-only dashboard. You present while logged in. |
 | 2 | Dedicated demo Gmail account and a demo Slack workspace. |
 | 3 | **Teams:** we assume no work/school tenant. The Teams connector is built and tested against mocks in Step 6. In production it runs on labelled demo data unless `MS_*` env vars are set later. |
-| 4 | **LLM:** Anthropic. `LLM_MODEL=claude-haiku-5-5` for triage, `LLM_DRAFT_MODEL=claude-sonnet-5-5` for drafts. To stay near **$5/month**: `AGENT_MAX_JOBS_PER_HOUR=30`, the rule-based prefilter skips bulk mail, drafts only when needed, and the demo connector emits at most a few messages an hour. Also set a hard spend limit in the Anthropic console. |
-| 5 | **Hosting: Railway Hobby (~$5/mo), Singapore region.** Render free with a keep-alive ping is rejected for three reasons. Restarts and deploys still cold-start the app, which breaks Slack's 3-second webhook deadline. The keep-alive ping keeps Neon awake anyway. And free-tier instance hours barely cover one service running all month. |
+| 4 | **LLM (R7, R8):** Groq free tier, `LLM_PROVIDER=groq`, `LLM_MODEL=openai/gpt-oss-120b` for both triage and drafts, `reasoning_effort=low`.<ul><li>Gemini free tier is the alternative, for demo data only.</li><li>Budget guards: `AGENT_MAX_JOBS_PER_HOUR=3` and `AGENT_MAX_TOKENS_PER_DAY=180000` (90% of Groq's 200K TPD).</li><li>The rule-based prefilter skips bulk mail, drafts happen only when needed, and the demo connector emits at most 3 messages an hour.</li><li>Cost: $0.</li></ul> |
+| 5 | **Hosting (R6, R9): Render Free, Singapore. No background loops**; work runs on a 30-minute GitHub Actions cron (`/internal/tick`), on startup, and on demand. There are no keep-alive pings, so Neon can sleep. Slack's retries cover webhooks that arrive during a cold start (§8). Cost: $0. |
 | 6 | Slack replies post as you (user token). You are admin of the demo workspace. |
 | 7 | Dashboard login is GitHub OAuth (Auth.js). |
 | 8 | **Docker Desktop is installed**, so local dev and tests use `docker compose` Postgres 16. A Neon `test` branch is the fallback if Docker is unavailable. |
 | 9 | Public GitHub repo named `Hubline`. The UI product name is **Hubline**. |
 | 10 | Gmail: inbox minus Promotions/Social, 48h backfill, reply to sender only. |
-| 11 | **Singapore** for Neon (AWS ap-southeast-1), Railway (asia-southeast1) and Vercel functions (`sin1`). `OWNER_TIMEZONE=Asia/Kolkata`. |
+| 11 | **Singapore** for Neon (AWS ap-southeast-1), Render (Singapore) and Vercel functions (`sin1`). `OWNER_TIMEZONE=Asia/Kolkata`. |
 | 12 | Owner: `AGENT_OWNER_NAME="Dhruv Sonkusare"`, `AGENT_OWNER_CONTEXT="Python backend developer"`. VIP list comes later. |
 
-**Note on R3 and Neon sleep:** Neon free tier suspends compute only after about 5 minutes with no queries. A 60s idle poll still keeps the DB awake. For the DB to actually sleep, either set `ENABLE_SCHEDULER=false` / `ENABLE_AGENT_WORKER=false`, or raise `SCHEDULER_IDLE_MAX_S` / `WORKER_IDLE_MAX_S` above 300. Enabled connectors with due polls still wake it on their own interval. API actions in the same process (toggle, sync, webhook) wake the loops immediately through an in-process event, so long idle sleeps don't make the UI feel slow.
+**Note on R3/R10 and Neon sleep:** Neon Free suspends compute only after 5 minutes with no queries.
+- **Production (Render Free):** both loops are off (`ENABLE_SCHEDULER=false`, `ENABLE_AGENT_WORKER=false`), so nothing queries the DB between ticks and requests.
+- **Local dev:** the loops can stay on. Idle sleeps default to 600s (above 300s), so an idle app still lets the DB sleep.
+- **Responsiveness:** API actions (toggle, sync, sample, webhook) either wake the loops through an in-process event or, with the loops off, run one pass in the background. Long idle sleeps therefore never make the UI feel slow.
 
-> Sections 1–12 below are the original plan. Where they conflict with R1–R5 or the decisions above, R1–R5 and the decisions win.
+> Sections 1–12 below are the original plan. Where they conflict with R1–R10 or the decisions above, R1–R10 and the decisions win. §6 (LLM), §8 (deployment), §9 Step 4 and §11 have been rewritten for R6–R10.
 
 ## Context
 
@@ -68,7 +77,7 @@ Hubline/
 │   ├── PLAN.md                    # this plan
 │   ├── architecture.md            # data flow diagram, queue semantics, security model
 │   └── setup/
-│       ├── deploy.md              # Neon, Railway, Vercel step by step
+│       ├── deploy.md              # Neon Free, Render Free, Vercel Hobby, tick cron (all $0)
 │       ├── slack.md  slack-app-manifest.yaml
 │       ├── gmail.md               # Google Cloud project, consent screen, test users
 │       ├── teams.md               # Entra ID app registration
@@ -77,7 +86,7 @@ Hubline/
 ├── backend/
 │   ├── pyproject.toml  uv.lock  .python-version   # uv-managed, Python 3.12
 │   ├── .env.example
-│   ├── Dockerfile  .dockerignore  railway.toml
+│   ├── Dockerfile  .dockerignore            (render.yaml at repo root)
 │   ├── alembic.ini
 │   ├── migrations/
 │   │   ├── env.py                 # async engine, imports app.models metadata
@@ -116,7 +125,7 @@ Hubline/
 │   │   ├── services/
 │   │   │   ├── ingest.py          # ingest_messages(): upsert thread, INSERT … ON CONFLICT DO NOTHING, enqueue jobs
 │   │   │   ├── replies.py         # approve_and_send(): idempotent, at-most-once send
-│   │   │   ├── credentials.py     # Fernet/MultiFernet encrypt/decrypt, load/save
+│   │   │   ├── credentials.py     # Fernet encrypt/decrypt (single key, R2), load/save
 │   │   │   ├── connector_runtime.py # build Connector(ctx) for an account; persists refreshed tokens
 │   │   │   ├── oauth_flow.py      # start (state + PKCE), callback (validate, exchange, store)
 │   │   │   ├── feed.py            # list/detail queries, keyset pagination
@@ -687,15 +696,28 @@ These are produced with `model.with_structured_output(Schema)`, which uses tool 
 
 **Redraft:** adds `<previous_draft>` and "Revise according to: `{instructions}`".
 
-### LLM selection (`agent/llm.py`)
-- `get_chat_model()` calls `langchain.chat_models.init_chat_model(model=LLM_MODEL, model_provider=LLM_PROVIDER, temperature=0.2, timeout=60, max_retries=0)`.
-- Retries are handled in our own code, not inside the model client.
-- `LLM_PROVIDER=fake` returns `agent/fake.py`, which gives deterministic results. It is used by all tests and for offline demos.
-- Optional `LLM_DRAFT_MODEL` sets a different model for drafting.
-- **Suggested default:** `anthropic` / `claude-haiku-5-5` (cheap and fast for triage), with `LLM_DRAFT_MODEL=claude-sonnet-5-5` for better drafts. This is a question for you (§12).
+### LLM selection (`agent/llm.py`, R7)
+- `build_llm()` calls `langchain.chat_models.init_chat_model(model, model_provider=LLM_PROVIDER, timeout=60, max_retries=LLM_MAX_RETRIES (0), max_tokens=400|600, ...)` for every real provider.
+- It wraps the model with `with_structured_output(Schema, include_raw=True, method=...)`, where the method is chosen per provider:
+
+  | Provider | Model | Structured output | Notes |
+  |---|---|---|---|
+  | `groq` (**production default**) | `openai/gpt-oss-120b` | `json_schema`, `strict=True` (constrained decoding) | `reasoning_effort=low`. Free: 30 RPM, 1K RPD, 8K TPM, 200K TPD. |
+  | `google_genai` | `gemini-3.5-flash-lite` | `json_schema` | Free tier; **demo data only**, because Google may use free-tier prompts and humans may review them. |
+  | `anthropic` (optional extra, paid, not in the plan) | e.g. `claude-haiku-5-5` | `json_schema` | `output_config.effort`; never sends `temperature`. |
+  | `fake` (**default** for local dev and tests) | — | — | Deterministic, offline, $0. |
+
+- `LLM_TEMPERATURE` is sent only when set, and never to Anthropic.
+- Optional `LLM_DRAFT_MODEL` sets a different model for drafting; by default it is the same as `LLM_MODEL`.
+
+### Free-tier pacing and budgets (R8)
+- **Pacer:** a per-model sliding-window limiter (`LLM_RPM=30`, `LLM_TPM=8000`) waits up to 20s for a slot. Beyond that it raises a rate-limit error, so the job is deferred.
+- **Provider 429:** read `retry-after`, Groq's `x-ratelimit-reset-*` headers or Gemini's `retryDelay`. The job goes back to `pending` with `run_after = now() + retry_after`, its attempt is not counted, and the worker pauses for that long. **A 429 never fails a job.**
+- **Daily budget:** `agent_jobs.input_tokens/output_tokens` are added up on every attempt. The worker stops claiming when the rolling 24h sum reaches `AGENT_MAX_TOKENS_PER_DAY` (180K = 90% of Groq's TPD), or when it has started `AGENT_MAX_JOBS_PER_HOUR` (3) jobs in the last hour.
+- **Prompt size:** the message body is clipped to 2,000 characters, thread context to 3 messages × 300 characters, and the previous draft to 1,500 characters. Output caps are 400 tokens (triage) and 600 (draft).
 
 ### Retries and failure states
-- **Per LLM call:** tenacity, 3 attempts, exponential backoff with jitter (2s → 8s → 30s). It retries rate-limit, timeout, 5xx and connection errors. A parse or validation failure of the structured output gets 1 retry with the validation error added to the prompt.
+- **Per LLM call:** no transport retries in the client (`LLM_MAX_RETRIES=0`), so a 429 reaches the worker straight away and is deferred. A parse or validation failure of the structured output gets 1 retry with the validation error added to the prompt. Other errors (5xx, network) are retried at job level.
 - **Per job:** the worker claims jobs with this query:
   ```sql
   UPDATE agent_jobs SET status='running', locked_at=now(), locked_by=$me, attempts=attempts+1
@@ -708,8 +730,8 @@ These are produced with `model.with_structured_output(Schema)`, which uses tool 
   - On failure with attempts < max, it returns to `pending` with `run_after = now() + [30s, 2m, 10m][attempts-1]`.
   - Otherwise it becomes `dead`, and the message gets `agent_status='failed'` and `agent_error`.
 - **Stale jobs:** a maintenance reaper returns `running` jobs with `locked_at < now()-5 min` to `pending`. This covers a crash or redeploy mid-job.
-- **Concurrency:** `AGENT_CONCURRENCY=2` asyncio tasks. The poll interval is 2s while there is work and backs off to 15s when idle.
-- **Budget guard:** `AGENT_MAX_JOBS_PER_HOUR` (default 120). Above it, jobs are deferred (their `run_after` is pushed forward), not failed.
+- **Concurrency:** `AGENT_CONCURRENCY=1`, to fit the 8K TPM free limit. With the loop on (local), polling runs every 2s while there is work and backs off to `WORKER_IDLE_MAX_S` (600s) when idle. In production there is no loop: see R9.
+- **Budget guards:** see "Free-tier pacing and budgets" above. Over a budget, jobs simply wait; they are not failed.
 - **UI view of failures:** failed messages stay in the feed with a "?" priority and a **Retry agent** button. A message is never hidden because the agent failed.
 
 ---
@@ -723,7 +745,7 @@ Browser ──(session cookie, same origin)──► Next.js on Vercel (server c
                                               │  Authorization: Bearer BACKEND_API_TOKEN   (server-only env)
                                               │  X-Actor: github:<login>
                                               ▼
-                                         FastAPI on Railway ──► Neon / Slack / Google / Graph / LLM
+                                         FastAPI on Render Free ──► Neon / Slack / Google / Graph / Groq
 ```
 
 **Dashboard login:**
@@ -742,7 +764,7 @@ Browser ──(session cookie, same origin)──► Next.js on Vercel (server c
 - CORS is **disabled** on the backend, with no allowed origins. The only browser→backend hops are top-level OAuth redirects, and those aren't CORS requests.
 
 **Third-party tokens** (Gmail, Slack, Graph):
-- They live only in `connector_credentials.ciphertext`, encrypted with Fernet (`CREDENTIALS_ENCRYPTION_KEYS`, MultiFernet so keys can be rotated).
+- They live only in `connector_credentials.ciphertext`, encrypted with a single Fernet key (`CREDENTIALS_ENCRYPTION_KEY`, R2).
 - They are never returned by any endpoint.
 - A structlog processor redacts keys matching `token|secret|authorization|code|password` from logs.
 - The OAuth `code` exchange happens only on the backend. Client secrets are only ever in backend env vars.
@@ -757,7 +779,7 @@ Browser ──(session cookie, same origin)──► Next.js on Vercel (server c
 7. It redirects with a 302 to `https://<vercel>/connectors?connected=gmail`.
 
 **Why not let the browser call FastAPI with a JWT:**
-- A cookie set by `*.vercel.app` and read by `*.up.railway.app` is a third-party cookie, which Safari blocks and Chrome restricts.
+- A cookie set by `*.vercel.app` and read by `*.onrender.com` is a third-party cookie, which Safari blocks and Chrome restricts.
 - Putting the token in JS exposes it to any XSS.
 - The BFF costs about 20–50 ms per request, which is fine.
 
@@ -765,50 +787,90 @@ Browser ──(session cookie, same origin)──► Next.js on Vercel (server c
 
 ## 8. Deployment design
 
-### Backend host recommendation: **Railway (Hobby, ~$5/month)**
-The backend has to be a long-running process, because the scheduler and worker run inside it.
+Everything runs on free tiers (R6). Total cost: **$0/month**.
 
-| | Railway Hobby | Render | Fly.io |
+| Piece | Service (free tier) | Free limits that matter |
+|---|---|---|
+| Backend (FastAPI) | **Render Free** web service, Singapore | Spins down after **15 min** with no inbound HTTP and takes about **1 min** to spin up. 750 instance hours per workspace per month. One instance, no persistent disk. Render may restart it at any time. |
+| Frontend (Next.js) | **Vercel Hobby** | Personal, non-commercial use. Functions in `sin1`. |
+| Database | **Neon Free**, AWS ap-southeast-1 | **100 CU-hours/project/month**. Minimum 0.25 CU. Suspends after **5 min** idle, which can't be changed on Free. 1 GB storage. |
+| LLM | **Groq free tier** (`openai/gpt-oss-120b`); Gemini free tier as the alternative | 30 RPM, 1K RPD, 8K TPM, 200K TPD (Groq) |
+| Cron | **GitHub Actions** schedule on the public repo | Free on public repos. Minimum interval 5 min; runs can be delayed. **Disabled after 60 days without repo activity.** |
+
+### Backend: Render Free, with no background loops (R9)
+Render Free stops the process 15 minutes after the last inbound request, so in-process loops can't be relied on. Running them anyway would also keep Neon awake while the instance is up. Production therefore sets:
+
+```
+ENABLE_SCHEDULER=false  ENABLE_AGENT_WORKER=false  WORK_ON_DEMAND=true  TICK_ON_STARTUP=true
+TICK_SECRET=<random 32+ chars>  TICK_BUDGET_S=60
+```
+
+Work happens in exactly three places:
+1. **`POST /internal/tick`**, with header `X-Tick-Secret: $TICK_SECRET`, called by the cron every 30 minutes.
+   - It runs one scheduler pass (polls every due connector), then drains agent jobs for at most `TICK_BUDGET_S` (60s).
+   - `?wait=false` (the default) answers `202` at once and runs in the background, which suits crons with short timeouts. `?wait=true` returns `{polled, agent_jobs, elapsed_s, stopped}`.
+   - Ticks are single-flight: an overlapping call returns `stopped: "busy"`.
+   - With no `TICK_SECRET`, the route returns 404.
+2. **On boot** (`TICK_ON_STARTUP=true`): the request that wakes the instance (cron, webhook, dashboard) is followed by a tick, even if that request itself timed out during the cold start.
+3. **On demand** (`WORK_ON_DEMAND=true`): enable/sync a connector, generate a sample, and later incoming webhooks and approvals, run one pass in the background straight away. The demo stays responsive between cron ticks.
+
+Service config:
+- Web service from the repo, root `backend/`, Docker runtime, free instance type, region Singapore.
+- Start command: `alembic upgrade head && uvicorn app.main:create_app --factory --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers`.
+- Health check path: `/healthz`, which never touches the DB.
+- One instance. All work is SKIP LOCKED-safe anyway.
+
+### Free cron calling `/internal/tick`
+- **Primary: GitHub Actions** (`.github/workflows/tick.yml`). Repository secrets: `TICK_URL` (`https://<service>.onrender.com/internal/tick?wait=true`) and `TICK_SECRET`.
+  - Cron `*/30 1-17 * * *` (UTC), i.e. every 30 min from **06:30 to 23:00 IST**: 36 ticks/day. For 24/7, change it to `*/30 * * * *` (48/day; see the Neon estimate).
+  - `curl --retry 3 --retry-delay 20 --max-time 150` comfortably covers Render's ~1-minute spin-up plus the 60s drain.
+  - The step is skipped when the secrets aren't set.
+- **Alternative: cron-job.org** (free) pointing at `.../internal/tick` (no `wait`) with the `X-Tick-Secret` header.
+  - cron-job.org gives up on a request **after 30 s** and deactivates a job **after more than 25 failures**.
+  - Render's ~1 min spin-up will often exceed that 30 s. The tick still happens (Render starts the instance, then `TICK_ON_STARTUP` runs it), but cron-job.org records a failure. That's why GitHub Actions is the primary.
+
+### Slack webhooks against a sleeping instance (confirmed from Slack's Events API docs)
+- Slack expects an HTTP 2xx **within 3 seconds**; anything slower counts as a failed delivery.
+- It retries **up to 3 times**: **nearly immediately**, **after 1 minute**, and **after 5 minutes**. Retries carry `X-Slack-Retry-Num` (1–3) and `X-Slack-Retry-Reason` (e.g. `http_timeout`). Opting in to **Delayed Events** adds hourly retries for 24 h.
+- A delivery that wakes the sleeping Render instance times out (cold start ~1 min > 3 s). The 1-minute retry, or at worst the 5-minute one, reaches the now-awake instance, so the event arrives about 1–5 minutes late but isn't lost. Dedup on `(source, external_id)` makes duplicate deliveries harmless.
+- Slack disables an app's event subscriptions only when **more than 95% of deliveries fail within 60 minutes**. **Apps receiving fewer than 1,000 events per hour are exempt.** A demo workspace is far below that.
+- The Slack handler (Step 5) acknowledges in under 3 s (verify signature, insert, return 200) and kicks the agent in the background. It also sends `X-Slack-No-Retry: 1` on permanent rejections.
+- Safety net: each cron tick also polls Slack DM history (Step 5 backfill), so an event whose 3 retries all failed is still picked up within 30 minutes.
+
+**Region:** Render, Vercel functions and Neon all in **Singapore**.
+
+### Neon Free: compute-hour estimate (R10)
+- One project with branch `main` (production) and `dev` (optional checks via `scripts/verify_db.py`). Local dev and tests use Docker Postgres.
+- Set the compute's **autoscaling max to 0.25 CU**, so usage is exactly 0.25 CU × awake hours.
+- Direct (non-pooled) connection string, SQLAlchemy pool 5. `config.py` translates `sslmode=require` for asyncpg.
+- Migrations run on boot.
+
+| Source of DB activity | Assumption | Awake time | CU-h/month |
 |---|---|---|---|
-| Always-on | yes, no sleeping | **free tier sleeps after ~15 min idle**, which kills the scheduler and makes Slack's 3s webhook timeout fail on cold start; Starter ($7) is fine | yes if auto-stop is disabled |
-| Monorepo subdir + Dockerfile | root directory setting | yes | yes, via fly.toml |
-| Setup effort | lowest (GitHub connect, env UI, HTTPS domain included) | low | higher (flyctl, machines config) |
-| Cost | $5 including $5 usage; a 512 MB Python service fits | $7 Starter | pay as you go, ~$3–5 |
+| Cron ticks | 36/day (06:30–23:00 IST); each is ~1 min of queries + 5 min until suspend ≈ 6 min | 3.6 h/day | 0.25 × 3.6 × 30 = **27** |
+| Dashboard use | ~1 h/day with the dashboard open (presenting, testing) | 1 h/day | **7.5** |
+| Webhooks / on-demand outside those windows | ~20 isolated events/day × ~5 min (pessimistic, most overlap) | 1.7 h/day | **12.5** |
+| **Total** | | | **≈ 47 of 100 (≈ 47%)** |
 
-**Railway** is the recommendation: it is the cheapest always-on option with the least setup.
-**Render Starter** is the fallback if you'd rather pay a flat $7.
-No **free** tier is suitable, because sleeping breaks both background work and webhooks.
+With 24/7 ticks (48/day) the total is ≈ 56. With hourly ticks it is ≈ 33. If the free allowance ran out, Neon would suspend until the next month (data kept), so the estimate is checked again in Step 4 using Neon's usage page.
 
-**Railway service config:**
-- Root directory `backend/`, built from the `Dockerfile` (python:3.12-slim, uv sync --frozen, non-root user).
-- Start command: `alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers`.
-- **Exactly 1 replica and 1 worker.** SKIP LOCKED makes more replicas safe, but they'd only add cost.
-- Healthcheck: `/healthz`.
+**Render instance hours:** each wake is ~1 min boot + 15 min idle ≈ 16 min. 36 ticks × 16 min ≈ 9.6 h/day ≈ 290 h/month, plus ~60 h for dashboard and webhooks ≈ **350 of 750 h**.
 
-**Region:** put Railway, Vercel functions and Neon in the same region (e.g. US-East, or EU-West if you're in Europe; see §12).
-
-### Neon
-- One project with two branches:
-  - **`main`** for production.
-  - **`dev`** for local development against real Postgres, if Docker isn't available.
-- The backend uses the **direct (non-pooled)** connection string with an SQLAlchemy pool of 5. asyncpg prepared statements break behind PgBouncer transaction pooling, and we only have one client process.
-- Gotcha: asyncpg doesn't accept `sslmode=` in the URL. `config.py` strips it and passes `connect_args={"ssl": "require"}`.
-- Migrations run on boot (`alembic upgrade head`).
-
-### Vercel
-- Project root `frontend/`, framework Next.js.
+### Vercel Hobby
+- Project root `frontend/`, framework Next.js, functions region `sin1`. Hobby is for personal, non-commercial use, which covers this demo.
 - Production URL: e.g. `https://hubline.vercel.app`.
 - Preview deployments are protected by Vercel Authentication. GitHub login is configured only for production plus localhost.
+- **First dashboard request after the backend has slept** takes ~1 min while Render spins up. The dashboard shows a "waking the backend…" state (Step 3), and the Next.js server uses a 90s timeout for backend calls.
 
 ### Environment variables
-**Backend (Railway):**
+**Backend (Render):**
 
 | Group | Variables |
 |---|---|
-| Core | `DATABASE_URL`, `BACKEND_API_TOKENS`, `CREDENTIALS_ENCRYPTION_KEYS`, `PUBLIC_BASE_URL`, `FRONTEND_URL`, `LOG_LEVEL` |
-| Background work | `DEMO_MODE`, `ENABLE_SCHEDULER`, `ENABLE_AGENT_WORKER` |
-| LLM | `LLM_PROVIDER`, `LLM_MODEL`, `LLM_DRAFT_MODEL`, `ANTHROPIC_API_KEY` (or the matching provider key) |
-| Agent | `AGENT_CONCURRENCY`, `AGENT_MAX_JOBS_PER_HOUR`, `AGENT_OWNER_NAME`, `AGENT_OWNER_CONTEXT`, `AGENT_VIP_SENDERS`, `OWNER_TIMEZONE` |
+| Core | `DATABASE_URL`, `BACKEND_API_TOKENS`, `CREDENTIALS_ENCRYPTION_KEY`, `PUBLIC_BASE_URL`, `FRONTEND_URL`, `LOG_LEVEL`, `APP_ENV=production` |
+| Work model (R9) | `ENABLE_SCHEDULER=false`, `ENABLE_AGENT_WORKER=false`, `WORK_ON_DEMAND=true`, `TICK_ON_STARTUP=true`, `TICK_SECRET`, `TICK_BUDGET_S=60`, `DEMO_MODE=false` |
+| LLM (R7, R8) | `LLM_PROVIDER=groq`, `LLM_MODEL=openai/gpt-oss-120b`, `GROQ_API_KEY`, `LLM_RPM=30`, `LLM_TPM=8000` (or `google_genai` + `GOOGLE_API_KEY`) |
+| Agent | `AGENT_CONCURRENCY=1`, `AGENT_MAX_JOBS_PER_HOUR=3`, `AGENT_MAX_TOKENS_PER_DAY=180000`, `AGENT_OWNER_NAME`, `AGENT_OWNER_CONTEXT`, `AGENT_VIP_SENDERS`, `OWNER_TIMEZONE` |
 | Ingest | `BACKFILL_HOURS`, `BACKFILL_MAX`, `RETENTION_DAYS` |
 | Google | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` |
 | Slack | `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `SLACK_SIGNING_SECRET` |
@@ -819,14 +881,14 @@ No **free** tier is suitable, because sleeping breaks both background work and w
 `scripts/gen_keys.py` prints fresh values for the API token, the Fernet key and `AUTH_SECRET`.
 
 ### Webhook URLs and OAuth redirect URIs
-`API` = `https://<service>.up.railway.app`, or a custom `https://api.<yourdomain>`. `WEB` = `https://<project>.vercel.app`.
+`API` = `https://<service>.onrender.com`. `WEB` = `https://<project>.vercel.app`.
 
 | Purpose | URL to register | Where |
 |---|---|---|
 | Slack Events Request URL | `API/webhooks/slack` | Slack app → Event Subscriptions |
 | Slack OAuth redirect | `API/oauth/slack/callback` | Slack app → OAuth & Permissions |
 | Gmail OAuth redirect | `API/oauth/gmail/callback` | Google Cloud → OAuth client (Web) |
-| Gmail push (optional) | `API/webhooks/gmail` | Pub/Sub push subscription |
+| Free cron | `API/internal/tick` (header `X-Tick-Secret`) | GitHub Actions secrets `TICK_URL`, `TICK_SECRET` |
 | Teams OAuth redirect | `API/oauth/teams/callback` | Entra ID app → Authentication (Web) |
 | Teams notificationUrl / lifecycleNotificationUrl | `API/webhooks/teams`, `API/webhooks/teams/lifecycle` | set by our code when it creates the Graph subscription |
 | Dashboard login callback | `WEB/api/auth/callback/github` (+ `http://localhost:3000/api/auth/callback/github` in a separate dev OAuth app) | GitHub → OAuth Apps |
@@ -898,20 +960,27 @@ Then I stop and wait for you.
   - All backend and frontend checks are green.
 - **You set up by hand:** a GitHub OAuth App ("Hubline Dev", callback `http://localhost:3000/api/auth/callback/github`).
 
-### Step 4 — Deploy the whole thing (demo data only)
-- **Goal:** a live, login-protected demo on Vercel + Railway + Neon `main`, before any real accounts are connected. This proves the deploy path and gives the public HTTPS URL that Step 5's webhooks need.
-- **Files:** `backend/Dockerfile`, `.dockerignore`, `railway.toml`, `docs/setup/deploy.md`, `scripts/smoke.py` (calls healthz, lists messages, runs one approve against demo), README "Deploy" section.
+### Step 4 — Deploy the whole thing at $0 (demo data only)
+- **Goal:** a live, login-protected demo on **Vercel Hobby + Render Free + Neon Free (`main`)**, with the **GitHub Actions tick cron**, before any real accounts are connected. This proves the free deploy path and gives the public HTTPS URL that Step 5's webhooks need.
+- **Files:**
+  - `backend/Dockerfile`, `.dockerignore`
+  - `render.yaml` (Blueprint: free plan, Singapore, env var keys only)
+  - `.github/workflows/tick.yml` (already added; inert until its secrets exist)
+  - `docs/setup/deploy.md`, README "Deploy" section
+  - `scripts/smoke.py`: healthz, 401 without token, sample → triaged, a tick with `wait=true`
 - **Done when:**
-  - The `WEB` URL redirects to login, and you get in.
-  - Demo messages are triaged by the real LLM in production.
-  - `smoke.py --base $API` passes.
-  - `curl $API/api/messages` without a token returns 401.
-  - A redeploy mid-job doesn't lose the job (the reaper re-queues it).
-- **You set up by hand:**
-  - Railway account and project from the repo (root `backend/`) with env vars.
-  - Vercel project (root `frontend/`) with env vars.
-  - Neon `main` connection string.
-  - A production GitHub OAuth App.
+  - The `WEB` URL redirects to login, and you get in. A cold backend shows the "waking" state, then the feed.
+  - Generating a demo sample in production is triaged by **Groq** within about a minute of the backend being awake.
+  - The cron run in the GitHub Actions log shows `{"polled": ..., "agent_jobs": ..., "stopped": "drained"}`.
+  - `smoke.py --base $API` passes. `curl $API/api/messages` without a token returns 401. `curl -X POST $API/internal/tick` with a wrong secret returns 401.
+  - After a day: Neon's usage page shows about 1.5 CU-h/day or less (on track for ≤ 50/month). The Render dashboard shows the instance sleeping between ticks.
+  - **Every service is on its free plan, with no payment method required.**
+- **You set up by hand (all free):**
+  1. **Neon:** project in AWS Singapore, branch `main`, compute autoscaling **max 0.25 CU**. Copy the direct connection string, **making sure the host starts with `ep-…`** (not the abbreviated `...`).
+  2. **Render:** sign up with GitHub. New → Blueprint from the repo (or a Web Service with root `backend/`, Docker, **Free** instance, Singapore). Set the env vars from §8, generating `TICK_SECRET` with `scripts/gen_keys.py`.
+  3. **Groq:** create a free API key at console.groq.com and set it as `GROQ_API_KEY` on Render. Check the limits page shows the free-tier values for `openai/gpt-oss-120b`.
+  4. **Vercel Hobby:** import the repo, root `frontend/`, functions region `sin1`, env vars from §8.
+  5. **GitHub:** a production GitHub OAuth App (dashboard login). Repo secrets `TICK_URL` and `TICK_SECRET` for the cron workflow.
 
 ### Step 5 — Slack and Gmail live (the core demo goal)
 - **Goal:** real Slack DMs and mentions arrive within seconds, and Gmail inbox mail within about 60s. Approved replies land in the same Slack thread and Gmail thread.
@@ -944,7 +1013,7 @@ Then I stop and wait for you.
   - An expired access token refreshes automatically, while a revoked one shows `needs_reauth`.
   - All of the above is covered by respx tests with recorded payloads.
 - **You set up by hand:**
-  - Create the Slack app from the manifest and install it to your workspace. Copy the client id, client secret and signing secret into Railway.
+  - Create the Slack app from the manifest and install it to your workspace. Copy the client id, client secret and signing secret into Render env vars.
   - Create a Google Cloud project and enable the Gmail API.
   - Configure the OAuth consent screen (External, **Testing**), add yourself as a test user, and create a Web OAuth client with the redirect URI.
 
@@ -1010,8 +1079,15 @@ E2E auth: Playwright uses an Auth.js Credentials provider that is **only compile
 - **Google OAuth "Testing" mode:** refresh tokens expire after **7 days**, and `gmail.readonly`/`gmail.send` are restricted scopes, so publishing the app would need Google verification (not realistic for a demo). Mitigation: reconnect before demos; the UI shows `needs_reauth` clearly.
 - **Teams needs a work or school Microsoft 365 tenant.** Graph Teams chat APIs don't work with personal Microsoft accounts, the free M365 developer sandbox is no longer generally available, and some tenants block user consent. This is the most likely item to fall back to demo data.
 - **LinkedIn and X:** there is no legitimate API for personal DMs (LinkedIn messaging is partner-only, and X DM read needs a paid tier). Mitigation: demo data or your own data export. We don't scrape, since that breaks their terms.
-- **Neon free tier:** compute auto-suspends when idle, but our pollers query every few seconds, so it **never suspends**. That may exceed the free compute-hour allowance. Mitigation: verify current limits in Step 4. Options are idle backoff (worker polls every 15s, scheduler every 60s), setting `ENABLE_SCHEDULER=false` when not demoing, or Neon's paid tier.
-- **Hosting is not free:** about $5–7/month. No free host keeps a process alive.
+- **Neon Free compute (100 CU-h/month):** production has no polling loops, so the DB sleeps between ticks. The estimate is ≈ 47 CU-h/month (§8). Mitigations if usage creeps up: hourly ticks (≈ 33), a narrower daytime window, a shorter dashboard auto-refresh. If the allowance ran out, Neon would suspend until the next month; there's no paid fallback.
+- **Render Free cold starts (~1 min after 15 idle minutes):**
+  - Slack events that arrive while it sleeps come 1–5 minutes late through Slack's retries (§8).
+  - The first dashboard load after idle waits about a minute.
+  - Gmail is polled only on ticks (every 30 min) or on "sync now".
+  - Render may restart free services at any time; the leases and reaper make that safe.
+- **Free LLM limits (Groq: 200K tokens/day, 8K/min, 1K requests/day):** throughput is capped at 3 messages/hour (72/day) by design. On a demo day, raise `AGENT_MAX_JOBS_PER_HOUR`; the 24h token guard still protects the daily limit. Free-tier model line-ups change, so the model is an env var and `scripts/llm_probe.py` checks a new one in a single call.
+- **Gemini free tier data use:** Google may use free-tier prompts to improve its products, and humans may review them. Gemini is therefore for demo accounts only.
+- **GitHub Actions schedules** can run late and are disabled after 60 days without repo activity. The README notes this; re-enable from the Actions tab.
 - **In-process workers** (fixed by the brief): simple, but a deploy restarts them. The leases and reaper make this safe. LLM calls share the web event loop, but they are async, so API latency isn't affected.
 - **Slack:** you may need workspace-admin approval to install an app. User-token events only cover conversations you're in. Slack has tightened history rate limits for non-Marketplace apps; we only use history for the small backfill, and the webhook path doesn't depend on it.
 - **Prompt injection:** a malicious email could try to steer a summary or draft. The agent has no tools and can't send, so the worst case is a misleading draft that you'd see before approving.
@@ -1045,8 +1121,8 @@ E2E auth: Playwright uses an Auth.js Credentials provider that is **only compile
 1. **Demo audience:** login-only for you, or also a guest login that sees only demo-labelled data? (Recommended: login-only, and present while logged in.)
 2. **Accounts for the demo:** your real Gmail and Slack, or dedicated demo accounts? (Recommended: dedicated.)
 3. **Teams:** do you have a work/school M365 tenant where you can register an app and consent to `Chat.Read`/`ChatMessage.Send`? If not, is Teams on demo data acceptable?
-4. **LLM:** which provider and model, and is a monthly cap OK (e.g. about $5–10)? (Suggested: Anthropic, `claude-haiku-5-5` for triage and `claude-sonnet-5-5` for drafts.)
-5. **Hosting:** OK with Railway Hobby (~$5/mo)? Or Render Starter ($7)?
+4. **LLM:** *answered and superseded by R7:* Groq free tier (Gemini as the alternative), $0.
+5. **Hosting:** *answered and superseded by R6/R9:* Render Free, Vercel Hobby, Neon Free, $0.
 6. **Slack identity:** should replies post **as you** (user token, recommended) or as a "Hubline" bot? Are you an admin of the workspace you'll use?
 7. **Dashboard login:** GitHub OAuth (recommended) or a single password?
 8. **Local setup:** is Docker Desktop available on this Windows machine? If not, tests will use a Neon `test` branch instead of local Postgres.

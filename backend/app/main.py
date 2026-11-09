@@ -19,6 +19,7 @@ from app.logging import configure_logging, request_id_middleware
 from app.runtime import Runtime
 from app.services.connector_runtime import sync_registry
 from app.workers.agent_worker import AgentWorker
+from app.workers.runner import WorkRunner
 from app.workers.scheduler import Scheduler
 from app.workers.supervisor import Supervisor, Wakeups
 
@@ -42,35 +43,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         async with sessionmaker() as session, session.begin():
             await sync_registry(session, settings)
 
+        # Scheduler and worker always exist: the loops are optional (R3), but /internal/tick
+        # and on-demand kicks use the same objects when the loops are off (Render free).
+        scheduler = Scheduler(
+            sessionmaker,
+            settings,
+            http,
+            runtime.wakeups.scheduler,
+            on_new_jobs=lambda: runtime.runner.kick_agent() if runtime.runner else None,
+        )
+        worker = AgentWorker(sessionmaker, settings, runtime.wakeups.agent)
+        runtime.runner = WorkRunner(
+            scheduler,
+            worker,
+            settings,
+            runtime.wakeups,
+            scheduler_loop=settings.enable_scheduler,
+            worker_loop=settings.enable_agent_worker,
+        )
         if settings.enable_scheduler:
-            scheduler = Scheduler(
-                sessionmaker,
-                settings,
-                http,
-                runtime.wakeups.scheduler,
-                agent_wake=runtime.wakeups.agent,
-            )
             supervisor.start("scheduler", scheduler.run)
         else:
             supervisor.mark("scheduler", "disabled")
         if settings.enable_agent_worker:
-            worker = AgentWorker(sessionmaker, settings, runtime.wakeups.agent)
             supervisor.start("agent_worker", worker.run)
         else:
             supervisor.mark("agent_worker", "disabled")
-        if settings.llm_provider == "anthropic" and settings.anthropic_api_key is None:
-            log.warning("anthropic_api_key_missing", hint="set ANTHROPIC_API_KEY")
+        if settings.tick_on_startup:
+            runtime.runner.spawn_tick()
         log.info(
             "startup_complete",
             version=__version__,
             env=settings.app_env,
             connectors=connectors,
             llm_provider=settings.llm_provider,
+            llm_model=settings.llm_model,
             workers=supervisor.status,
+            work_on_demand=settings.work_on_demand,
+            tick_endpoint=settings.tick_secret is not None,
         )
         try:
             yield
         finally:
+            await runtime.runner.stop()
             await supervisor.stop()
             await http.aclose()
             await engine.dispose()

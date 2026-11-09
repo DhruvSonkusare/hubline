@@ -5,13 +5,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.agent.llm import StructuredLLM, call_structured
+from app.agent.llm import MAX_TOKENS, StructuredLLM, call_structured
 from app.agent.prompts import draft_prompt, triage_prompt
 from app.agent.schemas import DraftResult, TriageResult, normalize_draft, normalize_triage
 from app.agent.state import AgentState
 
-TRIAGE_MAX_TOKENS = 2000  # thinking (adaptive, low effort) counts against max_tokens
-DRAFT_MAX_TOKENS = 4000
+TRIAGE_MAX_TOKENS = MAX_TOKENS["triage"]  # reasoning tokens count against max_tokens
+DRAFT_MAX_TOKENS = MAX_TOKENS["draft"]
 MAX_DRAFT_ATTEMPTS = 2  # first draft + one retry after validation feedback
 
 _NOREPLY_SENDER = re.compile(

@@ -20,7 +20,15 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.graph import build_graph, run_agent
-from app.agent.llm import LLMConfigError, LLMRefusalError, StructuredLLM, build_llm
+from app.agent.llm import (
+    LLMConfigError,
+    LLMRateLimitError,
+    LLMRefusalError,
+    StructuredLLM,
+    Usage,
+    build_llm,
+    job_usage,
+)
 from app.agent.prompts import PROMPT_VERSION
 from app.agent.state import (
     DEFAULT_MAX_REPLY_CHARS,
@@ -63,6 +71,11 @@ _CLAIM_SQL = text(
 
 _RECENT_STARTS_SQL = text(
     "SELECT count(*) FROM agent_jobs WHERE locked_at > now() - interval '1 hour'"
+)
+# Rolling 24h token use (free-tier TPD guard). Tokens are written on every attempt.
+_TOKENS_24H_SQL = text(
+    "SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM agent_jobs "
+    "WHERE updated_at > now() - interval '24 hours'"
 )
 
 
@@ -117,6 +130,12 @@ class AgentWorker:
             vips=settings.vip_senders,
         )
         self._budget_logged = False
+        self.paused_until = 0.0  # monotonic time; set when the provider rate-limits us
+        self.idle_reason = "idle"  # why the last tick claimed nothing (for /internal/tick)
+
+    @property
+    def pause_remaining_s(self) -> float:
+        return max(0.0, self.paused_until - time.monotonic())
 
     # ------------------------------------------------------------------ loop
 
@@ -138,27 +157,46 @@ class AgentWorker:
             if processed:
                 backoff.reset()
                 delay = 0.0
+            elif self.pause_remaining_s:
+                delay = self.pause_remaining_s
             else:
                 delay = backoff.next()
             await sleep_or_wake(self.wake, stop, delay)
 
     async def tick(self) -> int:
-        """Claim up to AGENT_CONCURRENCY jobs (within the hourly budget) and process them."""
+        """Claim up to AGENT_CONCURRENCY jobs (within the hourly and daily budgets) and process
+        them. Returns the number processed; `idle_reason` says why it was 0."""
+        if self.pause_remaining_s:
+            self.idle_reason = "rate_limited"
+            return 0
         limit = min(self.settings.agent_concurrency, await self._budget_left())
         if limit <= 0:
+            self.idle_reason = "budget"
             return 0
         jobs = await self.claim(limit)
         if jobs:
             await asyncio.gather(*(self.process(job) for job in jobs))
+        else:
+            self.idle_reason = "drained"
         return len(jobs)
 
     async def _budget_left(self) -> int:
+        """Jobs we may start now: hourly job cap, then the rolling 24h token budget."""
         cap = self.settings.agent_max_jobs_per_hour
+        token_cap = self.settings.agent_max_tokens_per_day
         async with self.sessionmaker() as session:
             started = int((await session.execute(_RECENT_STARTS_SQL)).scalar_one())
+            used = int((await session.execute(_TOKENS_24H_SQL)).scalar_one()) if token_cap else 0
         left = cap - started
+        if token_cap and used >= token_cap:
+            left = 0
         if left <= 0 and not self._budget_logged:
-            log.warning("agent_budget_exhausted", max_jobs_per_hour=cap)
+            log.warning(
+                "agent_budget_exhausted",
+                max_jobs_per_hour=cap,
+                tokens_24h=used,
+                max_tokens_per_day=token_cap,
+            )
             self._budget_logged = True
         elif left > 0:
             self._budget_logged = False
@@ -177,6 +215,8 @@ class AgentWorker:
 
     async def process(self, job: ClaimedJob) -> None:
         jlog = log.bind(job_id=job.id, kind=job.kind, message_id=str(job.message_id))
+        usage = Usage()
+        token = job_usage.set(usage)  # LLM calls in this task add their tokens here
         try:
             state = await self.load_state(job)
             if state is None:  # message deleted meanwhile
@@ -185,16 +225,21 @@ class AgentWorker:
             result = await asyncio.wait_for(
                 run_agent(self.graph, state), timeout=self.settings.agent_job_timeout_s
             )
-            await self.persist(job, result)
-            jlog.info("agent_job_done", **result_summary(result))
+            await self.persist(job, result, usage)
+            jlog.info("agent_job_done", tokens=usage.total_tokens, **result_summary(result))
         except asyncio.CancelledError:
             raise  # shutdown: the reaper re-queues the job on the next start
+        except LLMRateLimitError as exc:
+            jlog.warning("agent_job_deferred_rate_limited", retry_after_s=exc.retry_after)
+            await self.defer(job, exc, usage)
         except (LLMRefusalError, LLMConfigError) as exc:
             jlog.warning("agent_job_failed_permanently", error=str(exc))
-            await self.fail(job, exc, permanent=True)
+            await self.fail(job, exc, usage, permanent=True)
         except Exception as exc:
             jlog.exception("agent_job_failed", attempt=job.attempts)
-            await self.fail(job, exc)
+            await self.fail(job, exc, usage)
+        finally:
+            job_usage.reset(token)
 
     async def load_state(self, job: ClaimedJob) -> AgentState | None:
         async with self.sessionmaker() as session:
@@ -255,7 +300,7 @@ class AgentWorker:
             sender_name=msg.sender_name,
             subject=msg.subject,
             thread_title=thread_title,
-            body=msg.body,
+            body=_clip(msg.body, self.settings.agent_body_chars),
             received_at=msg.received_at,
             direction="outbound" if msg.direction == "outbound" else "inbound",
             can_send=can_send,
@@ -273,7 +318,7 @@ class AgentWorker:
             ThreadItem(
                 direction="outbound" if h.direction == "outbound" else "inbound",
                 sender_name=h.sender_name or h.sender_id,
-                body=h.body[:1500],
+                body=_clip(h.body, self.settings.agent_thread_item_chars),
                 received_at=h.received_at,
             )
             for h in reversed(history)
@@ -288,7 +333,7 @@ class AgentWorker:
             redraft_instructions=instructions,
         )
 
-    async def persist(self, job: ClaimedJob, state: AgentState) -> None:
+    async def persist(self, job: ClaimedJob, state: AgentState, usage: Usage | None = None) -> None:
         now = datetime.now(UTC)
         triage = state.get("triage")
         draft = state.get("draft")
@@ -338,9 +383,43 @@ class AgentWorker:
                         model=self.draft_llm.model_name,
                     )
                 )
-            await self._finish_job(job.id, session=session)
+            await self._finish_job(job.id, session=session, usage=usage)
 
-    async def fail(self, job: ClaimedJob, exc: BaseException, *, permanent: bool = False) -> None:
+    async def defer(self, job: ClaimedJob, exc: LLMRateLimitError, usage: Usage) -> None:
+        """Rate limited: put the job back for retry_after seconds without using up an attempt,
+        and pause the worker so the other jobs don't hit the same limit."""
+        wait = exc.retry_after
+        self.paused_until = max(self.paused_until, time.monotonic() + wait)
+        async with self.sessionmaker() as session, session.begin():
+            await session.execute(
+                update(AgentJob)
+                .where(AgentJob.id == job.id)
+                .values(
+                    status="pending",
+                    attempts=AgentJob.attempts - 1,  # a 429 is not a failed attempt
+                    run_after=func.now() + timedelta(seconds=wait),  # DB clock
+                    last_error=f"rate limited: {exc}"[:500],
+                    **_token_values(usage),
+                    updated_at=func.now(),
+                )
+            )
+            await session.execute(
+                update(Message)
+                .where(Message.id == job.message_id)
+                .values(
+                    agent_status="pending",
+                    agent_error=f"rate limited by the LLM provider; retrying in {wait:.0f}s",
+                )
+            )
+
+    async def fail(
+        self,
+        job: ClaimedJob,
+        exc: BaseException,
+        usage: Usage | None = None,
+        *,
+        permanent: bool = False,
+    ) -> None:
         error = f"{type(exc).__name__}: {exc}"[:500]
         delays = self.settings.retry_delays
         dead = permanent or job.attempts >= job.max_attempts
@@ -353,6 +432,7 @@ class AgentWorker:
                         status="dead",
                         last_error=error,
                         finished_at=func.now(),
+                        **_token_values(usage),
                         updated_at=func.now(),
                     )
                 )
@@ -368,7 +448,8 @@ class AgentWorker:
                     .values(
                         status="pending",
                         last_error=error,
-                        run_after=datetime.now(UTC) + timedelta(seconds=delay),
+                        run_after=func.now() + timedelta(seconds=delay),  # DB clock
+                        **_token_values(usage),
                         updated_at=func.now(),
                     )
                 )
@@ -378,12 +459,18 @@ class AgentWorker:
                     .values(agent_status="pending", agent_error=f"retrying: {error}")
                 )
 
-    async def _finish_job(self, job_id: int, *, session: AsyncSession | None = None) -> None:
+    async def _finish_job(
+        self, job_id: int, *, session: AsyncSession | None = None, usage: Usage | None = None
+    ) -> None:
         stmt = (
             update(AgentJob)
             .where(AgentJob.id == job_id)
             .values(
-                status="succeeded", last_error=None, finished_at=func.now(), updated_at=func.now()
+                status="succeeded",
+                last_error=None,
+                finished_at=func.now(),
+                **_token_values(usage),
+                updated_at=func.now(),
             )
         )
         if session is not None:
@@ -391,3 +478,19 @@ class AgentWorker:
             return
         async with self.sessionmaker() as s, s.begin():
             await s.execute(stmt)
+
+
+def _clip(text: str, limit: int) -> str:
+    """Bound what we send to the LLM (free-tier token budget)."""
+    return text if len(text) <= limit else text[:limit].rstrip() + " …[truncated]"
+
+
+def _token_values(usage: Usage | None) -> dict[str, Any]:
+    """Accumulate this attempt's token use onto the job row (counts toward the 24h budget)."""
+    if usage is None or not usage.calls:
+        return {}
+    return {
+        "input_tokens": AgentJob.input_tokens + usage.input_tokens,
+        "output_tokens": AgentJob.output_tokens + usage.output_tokens,
+        "llm_calls": AgentJob.llm_calls + usage.calls,
+    }

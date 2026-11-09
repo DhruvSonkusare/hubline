@@ -2,6 +2,16 @@
 
 One inbox for every alert. Hubline pulls messages from Gmail, Slack, Microsoft Teams, LinkedIn and X into a single feed. An AI agent ranks each message by priority, summarises it in one line and drafts a reply. You approve every reply before it is sent back through the app it came from. **The agent never sends anything on its own.**
 
+**Runs at $0.** The stack uses only free tiers:
+
+| Piece | Service |
+|---|---|
+| Backend | Render Free |
+| Frontend | Vercel Hobby |
+| Database | Neon Free |
+| LLM | Groq free tier (Gemini free tier optional) |
+| Cron | GitHub Actions on this public repo |
+
 > **Status: Step 2 of 6 complete (agent worker).** The backend runs locally. It has the connector framework, a demo connector, the polling scheduler, ingest with dedup, a LangGraph agent that scores, summarises and drafts every new message, and the messages and connectors API. The dashboard, deployment and real connectors arrive in Steps 3–6. See [docs/PLAN.md](docs/PLAN.md).
 
 | Step | What it adds | Status |
@@ -9,7 +19,7 @@ One inbox for every alert. Hubline pulls messages from Gmail, Slack, Microsoft T
 | 1 | Schema, ingest + dedup, connector framework, demo connector, scheduler, base API | ✅ done |
 | 2 | LangGraph agent worker: priority, summary, drafts | ✅ done |
 | 3 | Full API + Next.js dashboard (local) | ⏳ |
-| 4 | Deploy: Vercel + Railway + Neon (Singapore) | ⏳ |
+| 4 | Deploy at $0: Vercel Hobby + Render Free + Neon Free (Singapore) + tick cron | ⏳ |
 | 5 | Slack + Gmail live | ⏳ |
 | 6 | Teams, LinkedIn/X (read-only), hardening, demo script | ⏳ |
 
@@ -31,11 +41,21 @@ App event ─► webhook / 60s poll ─► connector.fetch_new() ─► normalis
   4. `validate_draft`: rejects placeholders and over-long drafts, with one retry that feeds the problem back.
 
   The worker loads context from the DB, runs the graph with no transaction open, then saves the priority, summary and a versioned draft.
-- **The LLM provider is swappable.**
-  - `LLM_PROVIDER=fake` (the default) is a deterministic offline model, so nothing costs money until you opt in.
-  - `anthropic` uses the official SDK with structured outputs and `effort=low`.
-  - Any other value goes through LangChain's `init_chat_model`; install the provider package first.
-- **Background work runs in the API process.** The scheduler claims due connectors with `FOR UPDATE SKIP LOCKED` plus a lease, so even several instances never poll the same connector twice. When idle it sleeps up to `SCHEDULER_IDLE_MAX_S` (60s by default). API actions such as enabling a connector or "sync now" wake it immediately.
+- **The LLM provider is swappable, and every provider goes through LangChain's `init_chat_model`.**
+  - `LLM_PROVIDER=fake` (the default) is a deterministic offline model, used for local dev and all tests.
+  - `groq` is the production default: free tier, `openai/gpt-oss-120b`, strict JSON-schema output.
+  - `google_genai` is Gemini's free tier (`gemini-3.5-flash-lite`).
+  - `anthropic` is optional and paid (`uv sync --extra anthropic`); the deployed setup doesn't use it.
+- **Free-tier limits are respected.**
+  - A per-model pacer keeps calls under the requests and tokens per minute.
+  - A provider `429` defers the job by `retry-after` and never fails it.
+  - A rolling 24-hour token budget and an hourly job cap keep the agent under the daily token limit.
+- **Background work runs in the API process.** The scheduler claims due connectors with `FOR UPDATE SKIP LOCKED` plus a lease, so even several instances never poll the same connector twice.
+  - **Locally,** the loops run and sleep up to 600s when idle. API actions such as enabling a connector or "sync now" wake them immediately.
+  - **On Render Free** the loops are off, because the instance sleeps after 15 idle minutes and Neon's free compute should sleep too. Work runs instead when:
+    - a GitHub Actions cron calls `POST /internal/tick` every 30 minutes;
+    - the app boots;
+    - an API action needs it.
 
 ## Local quickstart
 
@@ -76,13 +96,23 @@ curl -H "Authorization: Bearer $TOKEN" "localhost:8000/api/messages?sort=priorit
 uv run python -m scripts.show_feed     # same, plus the current draft text
 ```
 
-### Using the real model
+### Using a real (free) model
 
-Put `LLM_PROVIDER=anthropic`, `LLM_DRAFT_MODEL=claude-sonnet-5-5` and `ANTHROPIC_API_KEY=...` in `backend/.env`. Then check quality on 15 fixed samples, with a hard spend cap:
+1. Get a free key and put it in `backend/.env`:
+   - **Groq** (default): https://console.groq.com, `GROQ_API_KEY=...`
+   - **Gemini**: https://aistudio.google.com, `GOOGLE_API_KEY=...`
+2. Check it works with **one** request:
+   ```bash
+   uv run python -m scripts.llm_probe --provider groq
+   uv run python -m scripts.llm_probe --provider google_genai
+   ```
+3. Check quality on 15 fixed samples. The run is token-capped and paced to stay inside the free limits:
+   ```bash
+   uv run python -m scripts.agent_eval --provider groq --max-tokens 40000
+   ```
+4. To let the local worker use it, set `LLM_PROVIDER=groq` (or `google_genai`, with `LLM_MODEL=gemini-3.5-flash-lite`).
 
-```bash
-uv run python -m scripts.agent_eval --budget 0.05 --max-drafts 4   # triage table + a few drafts
-```
+> **Gemini free tier: demo accounts only.** Google's terms for unpaid services say submitted content is used to "provide, improve, and develop" Google's products, that "human reviewers may read, annotate, and process your API input and output", and "Do not submit sensitive, confidential, or personal information to the Unpaid Services". Use `google_genai` only with the dedicated demo Gmail and Slack accounts, never with a real inbox. Groq is the default for that reason.
 
 Interactive API docs are at http://localhost:8000/docs (disabled in production).
 
@@ -97,7 +127,7 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy
 
 - Database tests use **real Postgres**, because SKIP LOCKED, ON CONFLICT and partial indexes are Postgres-specific.
 - `TEST_DATABASE_URL` points tests at another database, for example a Neon `test` branch. The suite refuses to reset any database whose name doesn't contain `test`.
-- No test calls a real external API or LLM. The agent is tested with a scripted fake model, and the Anthropic adapter with a stub client.
+- No test calls a real external API or LLM. The agent is tested with a scripted fake model, and the LangChain adapter with stub chat models and the real Groq and Gemini exception classes.
 
 To check another database end to end (for example the Neon dev branch), run `uv run python -m scripts.verify_db --var NEON_DEV_DATABASE_URL`. It applies migrations, compares the schema with the models, boots the app against it and calls `/readyz`. It prints the host only, never the URL.
 
@@ -114,6 +144,9 @@ All `/api/*` routes need `Authorization: Bearer <BACKEND_API_TOKENS entry>`. Onl
 | PATCH | `/api/connectors/{key}` | `{"enabled": bool, "settings": {...}}`. Settings are merged and validated. |
 | POST | `/api/connectors/{key}/sync` | Poll this connector now (202). |
 | POST | `/api/connectors/{key}/sample` | Generate one message now. Only for connectors with the `sample` capability, i.e. demo. Optional body `{"scenario": "<name>"}`. The agent triages it within seconds. |
+| POST | `/internal/tick` | **Cron endpoint**, header `X-Tick-Secret: $TICK_SECRET`. Runs one scheduler pass, then drains agent jobs for at most `TICK_BUDGET_S` (60s). `?wait=true` returns `{polled, agent_jobs, elapsed_s, stopped}`; otherwise it answers `202` and runs in the background. Returns 404 unless `TICK_SECRET` is set. |
+
+**Free cron:** [.github/workflows/tick.yml](.github/workflows/tick.yml) calls the tick every 30 minutes from 06:30 to 23:00 IST. It stays inert until the repository secrets `TICK_URL` and `TICK_SECRET` exist. GitHub may delay scheduled runs, and it disables them after 60 days without repo activity; re-enable from the Actions tab.
 
 ## Configuration
 
@@ -123,17 +156,22 @@ Every setting is an environment variable. Locally they live in `backend/.env`; s
 |---|---|---|
 | `DATABASE_URL` | — | Any `postgres://` URL. Neon's `?sslmode=require` is handled. |
 | `BACKEND_API_TOKENS` | — | Comma list, so tokens can be rotated. At least 32 characters each in production. |
-| `ENABLE_SCHEDULER` / `ENABLE_AGENT_WORKER` | `true` | Set `false` to stop background DB traffic. |
-| `SCHEDULER_IDLE_MAX_S` / `WORKER_IDLE_MAX_S` | `60` | Longest idle sleep. Neon only scales to zero after about 5 minutes without queries, so use more than 300 if the DB should sleep. |
+| `ENABLE_SCHEDULER` / `ENABLE_AGENT_WORKER` | `true` | Background loops. **Set both to `false` on Render Free.** |
+| `SCHEDULER_IDLE_MAX_S` / `WORKER_IDLE_MAX_S` | `600` | Longest idle sleep. This is above Neon's 5-minute suspend delay, so an idle app lets the DB scale to zero. |
+| `WORK_ON_DEMAND` | `true` | With the loops off, API actions run one scheduler/agent pass in the background. |
+| `TICK_SECRET` | unset | Enables `POST /internal/tick`. Use 32+ random characters. |
+| `TICK_BUDGET_S` / `TICK_ON_STARTUP` | `60` / `false` | Longest agent drain per tick, and whether to tick once at boot (`true` on Render). |
 | `DEMO_MODE` | `false` | `true` only pre-enables the demo connector on first registration. |
 | `CONNECTORS_ENABLED` | unset | Optional allowlist, e.g. `demo,slack,gmail`. |
 | `OWNER_TIMEZONE` | `Asia/Kolkata` | Used for times shown in prompts. |
-| `LLM_PROVIDER` | `fake` | `fake` (offline, free), `anthropic`, or a LangChain provider name. |
-| `LLM_MODEL` / `LLM_DRAFT_MODEL` | `claude-haiku-5-5` / same | Triage model and draft model. Production uses `claude-sonnet-5-5` for drafts. |
-| `LLM_EFFORT` | `low` | Anthropic `effort`. Thinking tokens are billed, so keep it low. |
-| `ANTHROPIC_API_KEY` | unset | Needed only when `LLM_PROVIDER=anthropic`. |
-| `AGENT_MAX_JOBS_PER_HOUR` | `30` | Budget guard: jobs beyond this wait for the next hour. `0` pauses the agent. |
-| `AGENT_CONCURRENCY` | `2` | Jobs processed in parallel. |
+| `LLM_PROVIDER` | `fake` | `fake` (offline), `groq` (production), `google_genai` (Gemini, demo data only), `anthropic` (optional extra, paid), or any `init_chat_model` provider. |
+| `LLM_MODEL` / `LLM_DRAFT_MODEL` | `openai/gpt-oss-120b` / same | Triage model and draft model. For Gemini, use `gemini-3.5-flash-lite`. |
+| `LLM_EFFORT` | `low` | Reasoning effort, where the model supports it (gpt-oss, Anthropic). |
+| `GROQ_API_KEY` / `GOOGLE_API_KEY` / `ANTHROPIC_API_KEY` | unset | Key for the chosen provider. |
+| `LLM_RPM` / `LLM_TPM` | `30` / `8000` | Client-side pacing per model; Groq free limits for gpt-oss-120b. `0` turns it off. |
+| `AGENT_MAX_JOBS_PER_HOUR` | `3` | Hourly job cap, sized so 24 h × 3 × 2.5K tokens fits the daily budget. `0` pauses the agent. Raise it on demo days; the daily token guard still applies. |
+| `AGENT_MAX_TOKENS_PER_DAY` | `180000` | Rolling 24 h token budget: 90% of Groq's free 200K tokens/day. `0` turns it off. |
+| `AGENT_CONCURRENCY` | `1` | Jobs processed in parallel; 1 fits the 8K tokens/min free limit. |
 | `AGENT_RETRY_DELAYS_S` | `30,120,600` | Waits between retries. After 3 attempts the message shows `agent_status=failed`. |
 | `AGENT_OWNER_NAME` / `AGENT_OWNER_CONTEXT` / `AGENT_VIP_SENDERS` | Dhruv Sonkusare / Python backend developer / empty | Who the agent works for. VIP senders get higher priority. |
 

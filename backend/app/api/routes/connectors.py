@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_runtime, get_session
@@ -23,6 +23,7 @@ from app.schemas.connectors import (
 )
 from app.services.connector_runtime import allowed_by_env, build_connector, missing_settings
 from app.services.ingest import ingest_messages
+from app.workers.runner import WorkRunner
 
 router = APIRouter(prefix="/api/connectors", tags=["connectors"])
 
@@ -32,6 +33,11 @@ _ERRORS: dict[int | str, dict[str, object]] = {
     409: {"model": ErrorBody},
     422: {"model": ErrorBody},
 }
+
+
+def _runner(runtime: Runtime) -> WorkRunner:
+    assert runtime.runner is not None  # created in the lifespan
+    return runtime.runner
 
 
 def _to_out(account: ConnectorAccount, state: SyncState | None, runtime: Runtime) -> ConnectorOut:
@@ -131,16 +137,20 @@ async def patch_connector(
             )
         account.enabled = True
         if state is not None:
-            state.next_poll_at = now
-            state.updated_at = now
+            # DB clock, not the app host's: the scheduler compares against the DB's now(), and
+            # a host clock running ahead would make the connector look "not yet due".
+            state.next_poll_at = func.now()
+            state.updated_at = func.now()
         wake = True
     elif body.enabled is False:
         account.enabled = False
 
     account.updated_at = now
     await session.commit()
+    if wake and state is not None:
+        await session.refresh(state)
     if wake:
-        runtime.wakeups.scheduler.set()
+        _runner(runtime).kick_scheduler()
     return _to_out(account, state, runtime)
 
 
@@ -156,10 +166,10 @@ async def sync_connector(
         raise ApiError(409, "not_pollable", f"{key} does not support polling")
     if not account.enabled or account.status != "connected" or state is None:
         raise ApiError(409, "invalid_state", f"{key} must be connected and enabled to sync")
-    state.next_poll_at = datetime.now(UTC)
-    state.updated_at = state.next_poll_at
+    state.next_poll_at = func.now()  # DB clock (see patch_connector)
+    state.updated_at = func.now()
     await session.commit()
-    runtime.wakeups.scheduler.set()
+    _runner(runtime).kick_scheduler()
     return SyncScheduled()
 
 
@@ -191,7 +201,7 @@ async def create_sample_message(
     if not result.new_inbound_ids:  # pragma: no cover - ids are random
         raise ApiError(409, "duplicate", "sample collided with an existing message")
     if result.jobs_enqueued:
-        runtime.wakeups.agent.set()
+        _runner(runtime).kick_agent()
     return SampleOut(
         message_id=result.new_inbound_ids[0],
         external_id=message.external_id,
