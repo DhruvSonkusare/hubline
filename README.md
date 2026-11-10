@@ -12,15 +12,15 @@ One inbox for every alert. Hubline pulls messages from Gmail, Slack, Microsoft T
 | LLM | Groq free tier (Gemini free tier optional) |
 | Cron | GitHub Actions on this public repo |
 
-> **Status: Step 3 of 6 complete (dashboard, local).** The backend and the Next.js dashboard run locally. You log in with a password, see a prioritised feed, create demo messages, and review the agent's summary, draft and open questions. You can approve and send (into a demo outbox), copy, redraft, dismiss or triage. Deployment and real connectors arrive in Steps 4–6. See [docs/PLAN.md](docs/PLAN.md) and the [screenshots](reports/step-3-screenshots/).
+> **Status: Step 3 of 6 complete (dashboard, local).** The backend and the Next.js dashboard run locally. You log in with a password, see a prioritised feed, create demo messages, and review the agent's summary, draft and open questions. You can approve and send (into a demo outbox), copy, redraft, dismiss or triage. The deploy files are prepared, but deploying waits for GitHub (on hold). Slack + Gmail (Step 5) therefore run **locally first**; see [reports/step-5-plan.md](reports/step-5-plan.md). See [docs/PLAN.md](docs/PLAN.md) and the [screenshots](reports/step-3-screenshots/).
 
 | Step | What it adds | Status |
 |---|---|---|
 | 1 | Schema, ingest + dedup, connector framework, demo connector, scheduler, base API | ✅ done |
 | 2 | LangGraph agent worker: priority, summary, drafts | ✅ done |
 | 3 | Full API + Next.js dashboard (local) | ✅ done |
-| 4 | Deploy at $0: Vercel Hobby + Render Free + Neon Free (Singapore) + tick cron | ⏳ |
-| 5 | Slack + Gmail live | ⏳ |
+| 4 | Deploy at $0: Vercel Hobby + Render Free + Neon Free (Singapore) + tick cron | 🧰 files prepared; deploy waits for GitHub |
+| 5 | Slack + Gmail live (locally first: cloudflared tunnel + localhost OAuth) | 📝 planned, next |
 | 6 | Teams, LinkedIn/X (read-only), hardening, demo script | ⏳ |
 
 ## How it works
@@ -218,9 +218,30 @@ Every setting is an environment variable. Locally they live in `backend/.env`; s
 | `AGENT_RETRY_DELAYS_S` | `30,120,600` | Waits between retries. After 3 attempts the message shows `agent_status=failed`. |
 | `AGENT_OWNER_NAME` / `AGENT_OWNER_CONTEXT` / `AGENT_VIP_SENDERS` | Dhruv Sonkusare / Python backend developer / empty | Who the agent works for. VIP senders get higher priority. |
 
+## Deploy ($0)
+
+The files are ready, but nothing is deployed yet. Render and Vercel deploy from GitHub, which is on hold. The step-by-step guide is [docs/setup/deploy.md](docs/setup/deploy.md).
+
+- [`render.yaml`](render.yaml) is a Render Blueprint:
+  - **Free** plan, **Singapore**, Docker, 1 instance
+  - health check `/healthz`
+  - production env with loops off and tick on startup
+  - Groq as the model
+  - secrets prompted at creation, never committed
+- [`backend/Dockerfile`](backend/Dockerfile) builds a `python:3.12-slim` image from `uv.lock` without dev tools. It runs as a non-root user, runs `alembic upgrade head` on boot, and starts one uvicorn worker. [`backend/.dockerignore`](backend/.dockerignore) keeps `.env` out of the image.
+- [`frontend/vercel.json`](frontend/vercel.json) pins Vercel functions to `sin1`.
+- `tests/unit/test_deploy_config.py` fails if `render.yaml` stops being free, turns the loops on, or uses an env name that `Settings` doesn't know.
+
+Try the image locally:
+
+```bash
+docker build -t hubline-api:local backend    # then see "Test the image locally" in deploy.md
+```
+
 ## Repository layout
 
 ```
+render.yaml Render Blueprint for the backend (Free, Singapore)
 backend/    FastAPI app, connectors, workers, Alembic migrations, tests (uv project)
 frontend/   Next.js dashboard (App Router, Tailwind, Auth.js; Playwright e2e)
 docs/       PLAN.md (approved plan), setup guides (Steps 4–6)

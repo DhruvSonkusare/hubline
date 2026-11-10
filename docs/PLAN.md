@@ -1,6 +1,6 @@
 # Unified Alerts Hub (repo: `Hubline`) — Project Plan
 
-> **Status: APPROVED (2026-11-09) with revisions R1–R10 below.** This file is `docs/PLAN.md`, the source of truth.
+> **Status: APPROVED (2026-11-09) with revisions R1–R13 below.** This file is `docs/PLAN.md`, the source of truth.
 > **Hard requirement (R6): the whole project runs at $0.** No paid service, plan or API is used anywhere.
 > Any change to it is recorded in the step report that makes the change.
 
@@ -20,6 +20,7 @@
 | R10 | **Neon Free** gives 100 CU-hours/month and suspends after 5 idle minutes. Idle sleeps default to 600s (above 300s). In production no loop queries the DB at all, so it sleeps between ticks. The estimate is about 47 CU-hours/month (§8), and it must stay well under 100. |
 | R11 | **GitHub on hold (temporary; the account is unavailable).** Commit locally only: no push, no remote, no repo URL until the user says so. These wait until GitHub is back: GitHub OAuth login, the GitHub Actions CI and tick workflows (present in the repo, but never run), and Render/Vercel deploys from the repo. |
 | R12 | **Dashboard login uses a password for now.** It is an Auth.js **Credentials** provider with a single password, `DASHBOARD_PASSWORD` in `frontend/.env.local`.<ul><li>The password is compared in constant time (SHA-256 of both values, then `crypto.timingSafeEqual`).</li><li>Sessions use the same stateless JWT and `httpOnly`, `Secure`, `SameSite=Lax` cookie.</li><li>`auth.ts` builds its provider list from env vars only: `AUTH_PROVIDERS=password` (default), `github` or `password,github`.</li><li>GitHub needs `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET` and `ALLOWED_GITHUB_LOGINS`. **Switching to GitHub OAuth later is an env-var change only**; no code changes.</li></ul> |
+| R13 | **Step order swapped while GitHub is on hold (2026-11-10).** Step 4's deploy files are prepared now (`render.yaml`, `backend/Dockerfile`, `backend/.dockerignore`, `frontend/vercel.json`, `docs/setup/deploy.md`), but nothing is deployed. **Step 5 (Slack + Gmail) is built and verified LOCALLY first**, before Step 4 deploys:<ul><li>Slack events reach the PC through a free cloudflared quick tunnel (no account). Its URL changes every run and is pasted into the Slack app each session.</li><li>Gmail uses 60s polling plus OAuth to the exact redirect `http://localhost:8000/oauth/gmail/callback`.</li></ul>Step 4 deploys once GitHub is back; production URLs for the connectors are listed in `docs/setup/deploy.md`. Plan: `reports/step-5-plan.md`. |
 
 ## Decisions (answers to the §12 questions)
 
@@ -43,7 +44,7 @@
 - **Local dev:** the loops can stay on. Idle sleeps default to 600s (above 300s), so an idle app still lets the DB sleep.
 - **Responsiveness:** API actions (toggle, sync, sample, webhook) either wake the loops through an in-process event or, with the loops off, run one pass in the background. Long idle sleeps therefore never make the UI feel slow.
 
-> Sections 1–12 below are the original plan. Where they conflict with R1–R10 or the decisions above, R1–R10 and the decisions win. §6 (LLM), §8 (deployment), §9 Step 4 and §11 have been rewritten for R6–R10.
+> Sections 1–12 below are the original plan. Where they conflict with R1–R13 or the decisions above, R1–R13 and the decisions win. §6 (LLM), §8 (deployment), §9 Step 4 and §11 have been rewritten for R6–R10.
 
 ## Context
 

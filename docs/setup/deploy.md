@@ -1,10 +1,30 @@
 # Deploying Hubline at $0
 
-> Status: **draft**, written ahead of Step 4. The full deploy walkthrough (Render Free, Vercel Hobby, tick cron) is completed in Step 4. Everything here uses free tiers only (plan R6). The plan's §8 has the design and the arithmetic.
+> **Status: prepared, not deployed.** `render.yaml`, `backend/Dockerfile`, `backend/.dockerignore` and `frontend/vercel.json` are ready, and the image builds and runs locally (see "Test the image locally").
 >
-> **GitHub is on hold for now** (plan R11). Render and Vercel deploy from a GitHub repo, and the tick cron is a GitHub Actions workflow, so those parts of Step 4 wait until the account is available again.
+> **GitHub is on hold (plan R11).** Render and Vercel deploy from a GitHub repo, and the tick cron is a GitHub Actions workflow, so the steps below wait until the account is available again. Real connectors (Slack, Gmail) are built and run **locally first** (Step 5). Their production settings are listed at the end.
 
-## Neon Free (database)
+Everything here uses free tiers only:
+- Render Free
+- Vercel Hobby
+- Neon Free
+- Groq free tier
+- GitHub Actions on a public repo
+
+**Never pick a paid plan, instance type or add-on in any of these consoles.** PLAN §8 has the design and the usage arithmetic.
+
+| Piece | Where | Config in the repo |
+|---|---|---|
+| Database | Neon Free, AWS ap-southeast-1 (Singapore), autoscaling max 0.25 CU | none (connection string only) |
+| Backend | Render Free web service, Singapore, Docker, 1 instance | [`render.yaml`](../../render.yaml), [`backend/Dockerfile`](../../backend/Dockerfile) |
+| Frontend | Vercel Hobby, functions in `sin1` | [`frontend/vercel.json`](../../frontend/vercel.json) |
+| Background work | GitHub Actions cron → `POST /internal/tick` every 30 min, 06:30–23:00 IST | [`.github/workflows/tick.yml`](../../.github/workflows/tick.yml) |
+
+**Order:** 1 Neon → 2 secrets → 3 Render → 4 Vercel → 5 wire the URLs together → 6 tick cron → 7 verify.
+
+---
+
+## 1. Neon Free (database)
 
 1. Create a project in **AWS Asia Pacific (Singapore)**, Postgres 16. Use branch `main` for production and `dev` for checks.
 2. On each branch's compute, set **autoscaling max = 0.25 CU**. That keeps usage at 0.25 CU × awake hours. The budget is about 47 of 100 CU-h/month (PLAN §8).
@@ -22,7 +42,7 @@ Neon offers two hosts for every branch:
 Why direct:
 - The backend is **one long-running process** with its own SQLAlchemy pool of 5 connections, so a server-side pooler adds a hop and nothing else.
 - **asyncpg relies on prepared statements.** They work through Neon's pooler today (the Step 2 Neon check passed on the `-pooler` host), but transaction-mode pooling is the classic cause of `prepared statement … does not exist` errors under load. The direct endpoint avoids the issue entirely.
-- **Migrations** (`alembic upgrade head` on boot) take advisory locks and run DDL, which is best done on a direct connection.
+- **Migrations** (`alembic upgrade head` on every boot) take advisory locks and run DDL, which is best done on a direct connection.
 
 To get the direct string, open the Connect dialog and **turn "Connection pooling" off**. Or just remove `-pooler` from the host. Keep `?sslmode=require`; `app/db/engine.py` translates it for asyncpg.
 
@@ -35,15 +55,166 @@ DATABASE_URL=postgresql://<user>:<password>@ep-xxxx-xxxx.c-2.ap-southeast-1.aws.
 ```bash
 cd backend
 uv run python -m scripts.verify_db --var NEON_DEV_DATABASE_URL
-#   migrations: at revision 0004; schema diff vs models: none
+#   migrations: at revision 0005; schema diff vs models: none
 #   /readyz: HTTP 200 ...
 ```
 
-## Render Free (backend), Vercel Hobby (frontend), tick cron
+For `main`, put its direct string in `backend/.env` under a temporary name (e.g. `NEON_MAIN_DATABASE_URL`), run `verify_db --var NEON_MAIN_DATABASE_URL` once, then delete the line.
 
-Filled in during Step 4; see PLAN §8 and §9 (Step 4). In short:
-- **Render web service:** root `backend/`, Docker runtime, **Free** instance, Singapore.
-  - Production env: `ENABLE_SCHEDULER=false`, `ENABLE_AGENT_WORKER=false`, `WORK_ON_DEMAND=true`, `TICK_ON_STARTUP=true`, `TICK_SECRET=…`, `LLM_PROVIDER=groq`, `GROQ_API_KEY=…`.
-  - `DATABASE_URL` is the **direct** Neon string above.
-- **Vercel Hobby:** root `frontend/`, functions region `sin1`.
-- **Tick cron:** `.github/workflows/tick.yml` every 30 min, 06:30–23:00 IST. It is on hold with GitHub; cron-job.org is the documented fallback (30 s timeout caveat in PLAN §8).
+## 2. Generate production secrets
+
+```bash
+cd backend
+uv run python scripts/gen_keys.py
+```
+
+Use **fresh** values for production; never reuse the local ones. You need:
+
+| Value | Goes to |
+|---|---|
+| API token | Render `BACKEND_API_TOKENS` **and** Vercel `BACKEND_API_TOKEN` (same value) |
+| `AUTH_SECRET` | Vercel |
+| A new dashboard password (≥16 chars) | Vercel `DASHBOARD_PASSWORD` |
+| Fernet key | Render `CREDENTIALS_ENCRYPTION_KEY` (Step 5, real connectors) |
+
+`TICK_SECRET` is generated by Render itself (`generateValue: true` in `render.yaml`).
+
+## 3. Render Free (backend)
+
+`render.yaml` describes one service, `hubline-api`:
+- Docker runtime, **Free** plan, **Singapore** region, 1 instance.
+- Built from `backend/Dockerfile` with `backend/` as the build context.
+- Health check `/healthz`, which never touches the DB.
+- Auto-deploys on commits that touch `backend/**`, excluding tests and docs.
+
+The image is `python:3.12-slim`, with dependencies from `uv.lock` (no dev tools) and a non-root user. On every boot it runs `alembic upgrade head`, then `uvicorn … --workers 1 --proxy-headers`.
+
+1. Sign up at <https://dashboard.render.com> with GitHub. **No card is needed for the Free plan.**
+2. **New → Blueprint**, pick the `Hubline` repo and branch `main`. Render finds `render.yaml`.
+3. Render prompts for every `sync: false` value. These are asked **once**; later changes go in the service's **Environment** tab.
+
+   | Key | Value |
+   |---|---|
+   | `DATABASE_URL` | Neon `main`, **direct** host, `?sslmode=require` |
+   | `BACKEND_API_TOKENS` | the API token from step 2 |
+   | `GROQ_API_KEY` | your Groq key (free tier) |
+   | `PUBLIC_BASE_URL` | `https://hubline-api.onrender.com` (if Render shows a different URL after creation, update it) |
+   | `FRONTEND_URL` | `https://<project>.vercel.app`, or a placeholder until step 4 |
+
+4. **Apply.** The first build takes a few minutes. When it is live, check that the instance type says **Free**.
+5. Open **Environment** and copy `TICK_SECRET`; the cron needs it (step 6).
+
+Everything else is fixed in `render.yaml`:
+- `APP_ENV=production` and JSON logs.
+- **No background loops** (R9): `ENABLE_SCHEDULER=false`, `ENABLE_AGENT_WORKER=false`, `WORK_ON_DEMAND=true`, `TICK_ON_STARTUP=true`, `TICK_BUDGET_S=60`.
+- `DEMO_MODE=false`. Turn the demo connector on from the Connectors page.
+- Groq `openai/gpt-oss-120b` with effort `low`, 30 RPM / 8K TPM pacing, and a 180K-tokens/day budget.
+
+**What to expect on Render Free:**
+- The service **sleeps after 15 minutes** without inbound requests. The next request wakes it in **about 1 minute**, and the dashboard shows "Waking the backend…" meanwhile.
+- About 350 of the 750 free instance-hours per month are used (PLAN §8).
+- Render can restart the instance at any time. Leases and the reaper make that safe, and a send in flight becomes `unknown` rather than being retried.
+
+<details><summary>Without the Blueprint (manual service)</summary>
+
+New → Web Service → the repo, then set:
+- **Language:** Docker
+- **Root Directory:** empty
+- **Dockerfile Path:** `./backend/Dockerfile`
+- **Docker Build Context Directory:** `./backend`
+- **Region:** Singapore
+- **Instance Type:** Free
+- **Health Check Path:** `/healthz`
+
+Add the same env vars as in `render.yaml`.
+</details>
+
+## 4. Vercel Hobby (frontend)
+
+1. Sign up at <https://vercel.com> with GitHub and choose the **Hobby** plan (personal, non-commercial).
+2. **Add New → Project**, import `Hubline`, and set **Root Directory** to `frontend`. The framework (Next.js) is detected. `frontend/vercel.json` pins functions to **`sin1`** (Singapore, next to Render and Neon). Node comes from `package.json` `engines` (`26.x`).
+3. **Environment Variables** (Production):
+
+   | Key | Value |
+   |---|---|
+   | `AUTH_PROVIDERS` | `password` |
+   | `DASHBOARD_PASSWORD` | the new password from step 2 |
+   | `AUTH_SECRET` | from step 2 |
+   | `BACKEND_URL` | `https://hubline-api.onrender.com` |
+   | `BACKEND_API_TOKEN` | the same token as Render's `BACKEND_API_TOKENS` |
+
+   - Don't set `AUTH_TRUST_HOST` on Vercel; Auth.js detects Vercel itself.
+   - **Never prefix any of these with `NEXT_PUBLIC_`.**
+4. **Deploy.** Note the production URL, e.g. `https://hubline.vercel.app`.
+5. Keep **Settings → Deployment Protection → Vercel Authentication** on for previews (the default on Hobby).
+
+Later, GitHub login (R12) is an env change only: set `AUTH_PROVIDERS=github` (or `password,github`), plus `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET` and `ALLOWED_GITHUB_LOGINS`. The GitHub OAuth App's callback is `https://<project>.vercel.app/api/auth/callback/github`.
+
+## 5. Wire the URLs together
+
+On Render → **Environment**, set `FRONTEND_URL` to the Vercel production URL and check `PUBLIC_BASE_URL`, then **Save** (this redeploys).
+- `FRONTEND_URL` is where OAuth callbacks send you back.
+- `PUBLIC_BASE_URL` is the base for OAuth redirect URIs.
+
+## 6. Tick cron (GitHub Actions)
+
+`.github/workflows/tick.yml` runs `*/30 1-17 * * *` UTC: every 30 minutes from 06:30 to 23:00 IST, 36 runs a day. It is skipped until both secrets exist.
+
+1. On GitHub, open the repo → **Settings → Secrets and variables → Actions → New repository secret**:
+   - `TICK_URL` = `https://hubline-api.onrender.com/internal/tick?wait=true`
+   - `TICK_SECRET` = the value copied from Render
+2. **Actions → Tick backend → Run workflow** once. The log should end with `{"polled": …, "agent_jobs": …, "stopped": "drained"}`. The first call may take about a minute while Render wakes; curl retries cover it.
+3. GitHub disables scheduled workflows after **60 days without repo activity**. Any commit, or re-enabling the workflow under Actions, restores it.
+
+If GitHub Actions is not an option, use **cron-job.org** (free): `POST https://hubline-api.onrender.com/internal/tick` (no `wait`) with the header `X-Tick-Secret`. It gives up on a request after 30 s, so cold starts are logged as failures, but `TICK_ON_STARTUP` still runs the tick (PLAN §8).
+
+## 7. Verify
+
+```bash
+API=https://hubline-api.onrender.com
+curl -s $API/healthz                       # {"status":"ok",...}   (first call may take ~1 min)
+curl -s $API/readyz                        # {"status":"ok","db":"ok",...}
+curl -s -o /dev/null -w "%{http_code}\n" $API/api/messages            # 401
+curl -s -o /dev/null -w "%{http_code}\n" -X POST $API/internal/tick   # 401 (secret required)
+```
+
+Then on the Vercel URL:
+1. Log in with the dashboard password.
+2. Go to **Connectors**, enable **Demo**, and click **Generate sample**.
+3. Within about a minute the message shows a Groq priority, summary and draft.
+4. Approve the draft. It goes into the demo outbox, and the message moves to **Replied**.
+
+**Neon usage:** a week after the deploy, check Neon → Project → **Usage**. Compute should track about 1.5 CU-h/day (≈47/month). If it is much higher, something is keeping the DB awake; check that the Render env still has both loops `false`.
+
+## Test the image locally (no deploy, $0)
+
+Uses the local Docker Postgres. Run from the repo root:
+
+```bash
+docker compose up -d --wait db
+docker build -t hubline-api:local backend
+docker run --rm -p 8020:8000 \
+  -e DATABASE_URL=postgresql+asyncpg://hubline:hubline@host.docker.internal:5433/hubline_e2e \
+  -e BACKEND_API_TOKENS=local-docker-token-0123456789abcdef \
+  -e APP_ENV=production -e ENABLE_SCHEDULER=false -e ENABLE_AGENT_WORKER=false \
+  -e TICK_SECRET=local-docker-tick-secret-0123456789 \
+  hubline-api:local
+# another terminal:
+curl -s localhost:8020/readyz                                       # db ok
+curl -s -X POST -H "X-Tick-Secret: local-docker-tick-secret-0123456789" localhost:8020/internal/tick   # 202
+```
+
+## Later: real connectors in production (after Step 5)
+
+Step 5 runs Slack and Gmail **locally** first (`reports/step-5-plan.md`). When moving them to Render, add these as Environment variables:
+- `CREDENTIALS_ENCRYPTION_KEY`: a new Fernet key. **Production tokens are a separate set**, so reconnect each app once.
+- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
+- `SLACK_SIGNING_SECRET` (plus `SLACK_CLIENT_ID` and `SLACK_CLIENT_SECRET` for the OAuth install flow)
+
+Then register the production URLs:
+
+| Purpose | URL | Where |
+|---|---|---|
+| Gmail OAuth redirect | `https://hubline-api.onrender.com/oauth/gmail/callback` | Google Cloud → Clients → your Web client → add it as an additional redirect URI (keep the localhost one) |
+| Slack Events Request URL | `https://hubline-api.onrender.com/webhooks/slack` | Slack app → Event Subscriptions. Ideally a second app, "Hubline", so the local "Hubline Dev" tunnel URL can keep changing. |
+| Slack OAuth redirect | `https://hubline-api.onrender.com/oauth/slack/callback` | Slack app → OAuth & Permissions |

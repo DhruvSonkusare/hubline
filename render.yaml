@@ -1,0 +1,85 @@
+# Render Blueprint for the Hubline backend ($0: Render Free, Singapore). Plan R6/R9, docs/setup/deploy.md.
+# PREPARED, NOT DEPLOYED: Render deploys from a GitHub repo, which is on hold (R11).
+#
+# Render -> New -> Blueprint -> pick the repo. Every `sync: false` key is prompted ONCE at creation
+# (later Blueprint syncs ignore them; edit them in the service's Environment tab instead).
+# Paths are relative to the repo root (Render Blueprint spec), so no rootDir is set.
+services:
+  - type: web
+    name: hubline-api
+    runtime: docker
+    plan: free # never change: the project must run at $0
+    region: singapore # cannot be changed after creation
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    buildFilter:
+      paths:
+        - backend/**
+      ignoredPaths:
+        - backend/tests/**
+        - backend/**/*.md
+    healthCheckPath: /healthz # never touches the DB, so health checks don't wake Neon
+    autoDeployTrigger: commit
+    numInstances: 1
+    envVars:
+      # --- core
+      - key: APP_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: LOG_FORMAT
+        value: json
+      - key: DATABASE_URL # Neon main branch, DIRECT (non-pooled) host, ?sslmode=require
+        sync: false
+      - key: BACKEND_API_TOKENS # same value as BACKEND_API_TOKEN on Vercel
+        sync: false
+      - key: PUBLIC_BASE_URL # https://hubline-api.onrender.com (shown after creation)
+        sync: false
+      - key: FRONTEND_URL # https://<project>.vercel.app
+        sync: false
+      # --- work model (R9): no background loops on Render Free
+      - key: ENABLE_SCHEDULER
+        value: "false"
+      - key: ENABLE_AGENT_WORKER
+        value: "false"
+      - key: WORK_ON_DEMAND
+        value: "true"
+      - key: TICK_ON_STARTUP
+        value: "true"
+      - key: TICK_BUDGET_S
+        value: "60"
+      - key: TICK_SECRET # copy it from the Environment tab into the cron's TICK_SECRET
+        generateValue: true
+      - key: DEMO_MODE
+        value: "false"
+      # --- LLM (R7/R8): Groq free tier
+      - key: LLM_PROVIDER
+        value: groq
+      - key: LLM_MODEL
+        value: openai/gpt-oss-120b
+      - key: LLM_EFFORT
+        value: low
+      - key: LLM_RPM
+        value: "30"
+      - key: LLM_TPM
+        value: "8000"
+      - key: GROQ_API_KEY
+        sync: false
+      # --- agent budgets
+      - key: AGENT_CONCURRENCY
+        value: "1"
+      - key: AGENT_MAX_JOBS_PER_HOUR
+        value: "30"
+      - key: AGENT_MAX_TOKENS_PER_DAY
+        value: "180000"
+      - key: AGENT_OWNER_NAME
+        value: Dhruv Sonkusare
+      - key: AGENT_OWNER_CONTEXT
+        value: Python backend developer
+      - key: OWNER_TIMEZONE
+        value: Asia/Kolkata
+      - key: BACKFILL_AUTO_TRIAGE
+        value: "10"
+      # --- Step 5 (real connectors) adds, all `sync: false`:
+      #   CREDENTIALS_ENCRYPTION_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+      #   SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, SLACK_SIGNING_SECRET
