@@ -210,7 +210,6 @@ The 6 skips are contract cases that don't apply: the webhook-only path is covere
 ## Manual steps for you
 1. Each Slack session: run the tunnel helper, then paste the new URL into **api.slack.com/apps → Hubline Dev → Event Subscriptions → Request URL**. Wait for **Verified ✓**, then **Save Changes**.
 2. Before 2026-11-23, 20:08 IST: **Connectors → Gmail → Reconnect Gmail**. `dhruv.sonkusare.dev@gmail.com` is preselected; tick both boxes, then switch it on.
-3. Optional: fix the stray `"` in the system PATH entry `C:\Program Files\Amazon\AWSCLIV2"`, then restart VS Code. Until then, `npm run dev` needs `$env:PATH = $env:PATH.Replace('AWSCLIV2"', 'AWSCLIV2')` first.
 
 ## How to verify
 ```powershell
