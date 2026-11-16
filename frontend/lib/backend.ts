@@ -144,6 +144,8 @@ export const api = {
     call<Connector>(`/api/connectors/${id(key)}`, { method: "PATCH", body }),
   syncConnector: (key: string) =>
     call<Schemas["SyncScheduled"]>(`/api/connectors/${id(key)}/sync`, { method: "POST" }),
+  /** Dashboard opened: poll every active connector now (throttled on the backend). */
+  pollNow: () => call<Schemas["PollNowOut"]>("/api/connectors/poll-now", { method: "POST" }),
   scenarios: (key: string) =>
     call<Schemas["ScenarioList"]>(`/api/connectors/${id(key)}/scenarios`),
   connectWithToken: (key: string, fields: Record<string, string>) =>

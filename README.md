@@ -12,14 +12,14 @@ One inbox for every alert. Hubline pulls messages from Gmail, Slack, Microsoft T
 | LLM | Groq free tier (Gemini free tier optional) |
 | Cron | GitHub Actions on this public repo |
 
-> **Status: Step 5 of 7 complete, locally (Slack + Gmail live).** The backend and dashboard run on your PC. Real Slack DMs, group DMs and @mentions arrive within a second through a cloudflared tunnel. Gmail inbox mail arrives within about 60 s. Groq triages each message and drafts replies. Replies you approve go out through the original app, into the same Slack DM or thread and the same Gmail conversation. Mail from no-reply and notification senders is set to priority 1 and can't be answered. Deploying (Step 4) waits for GitHub (on hold). See [reports/step-5-report.md](reports/step-5-report.md), [docs/PLAN.md](docs/PLAN.md) and the [Step 3 screenshots](reports/step-3-screenshots/).
+> **Status: Step 5 of 7 complete, locally (Slack + Gmail live).** The backend and dashboard run on your PC. Real Slack DMs, group DMs and @mentions arrive within a second through a cloudflared tunnel. Gmail inbox mail arrives within about 60 s. Groq triages each message and drafts replies. Replies you approve go out through the original app, into the same Slack DM or thread and the same Gmail conversation. Mail from no-reply and notification senders is set to priority 1 and can't be answered. Next: deploying (Step 4) to Render Free + Vercel Hobby + Neon Free; see [reports/step-4-plan.md](reports/step-4-plan.md). See [reports/step-5-report.md](reports/step-5-report.md), [docs/PLAN.md](docs/PLAN.md) and the [Step 3 screenshots](reports/step-3-screenshots/).
 
 | Step | What it adds | Status |
 |---|---|---|
 | 1 | Schema, ingest + dedup, connector framework, demo connector, scheduler, base API | ✅ done |
 | 2 | LangGraph agent worker: priority, summary, drafts | ✅ done |
 | 3 | Full API + Next.js dashboard (local) | ✅ done |
-| 4 | Deploy at $0: Vercel Hobby + Render Free + Neon Free (Singapore) + tick cron | 🧰 files prepared; deploy waits for GitHub |
+| 4 | Deploy at $0: Vercel Hobby + Render Free + Neon Free (Singapore) + tick cron, then real Slack + Gmail in production | 📝 planned, prep done; deploy next |
 | 5 | Slack + Gmail live (locally first: cloudflared tunnel + localhost OAuth) | ✅ done (verified live) |
 | 6 | Teams, LinkedIn/X (read-only), hardening, demo script | ⏳ |
 | 7 | Self-hosting (Deploy to Render button, guide, setup check), public read-only demo, publish-safe repo | 📝 planned (R14) |
@@ -194,6 +194,7 @@ All `/api/*` routes need `Authorization: Bearer <BACKEND_API_TOKENS entry>`. Onl
 | GET | `/api/connectors` | Every registered connector with status, sync state and settings schema. |
 | PATCH | `/api/connectors/{key}` | `{"enabled": bool, "settings": {...}}`. Settings are merged and validated. |
 | POST | `/api/connectors/{key}/sync` | Poll this connector now (202). |
+| POST | `/api/connectors/poll-now` | The dashboard was opened: poll every active connector now (202, `{polling: [...]}`). Skips connectors polled in the last `DASHBOARD_POLL_MIN_AGE_S` seconds. In production this is how new Gmail shows up without waiting for the 30-min tick. |
 | GET | `/api/messages/stats` | Open counts per app and priority, and agent jobs in progress (sidebar). |
 | GET | `/api/messages/{id}` | Detail: the thread (including your replies), the current draft with `open_questions`, `draft_versions`, replies, and `can_send`. |
 | PUT | `/api/messages/{id}/draft` | Save your edit as a new draft version (no-op if unchanged). |
@@ -227,6 +228,7 @@ Every setting is an environment variable. Locally they live in `backend/.env`; s
 | `ENABLE_SCHEDULER` / `ENABLE_AGENT_WORKER` | `true` | Background loops. **Set both to `false` on Render Free.** |
 | `SCHEDULER_IDLE_MAX_S` / `WORKER_IDLE_MAX_S` | `600` | Longest idle sleep. This is above Neon's 5-minute suspend delay, so an idle app lets the DB scale to zero. |
 | `WORK_ON_DEMAND` | `true` | With the loops off, API actions run one scheduler/agent pass in the background. |
+| `DASHBOARD_POLL_MIN_AGE_S` | `60` | Opening the dashboard polls each active connector unless it was polled within this many seconds. |
 | `TICK_SECRET` | unset | Enables `POST /internal/tick`. Use 32+ random characters. |
 | `TICK_BUDGET_S` / `TICK_ON_STARTUP` | `60` / `false` | Longest agent drain per tick, and whether to tick once at boot (`true` on Render). |
 | `DEMO_MODE` | `false` | `true` only pre-enables the demo connector on first registration. |
@@ -251,7 +253,9 @@ Every setting is an environment variable. Locally they live in `backend/.env`; s
 
 ## Deploy ($0)
 
-The files are ready, but nothing is deployed yet. Render and Vercel deploy from GitHub, which is on hold. The step-by-step guide is [docs/setup/deploy.md](docs/setup/deploy.md).
+The files are ready, but nothing is deployed yet. Render and Vercel deploy from <https://github.com/DhruvSonkusare/hubline>. The click-by-click order is [reports/step-4-plan.md](reports/step-4-plan.md); [docs/setup/deploy.md](docs/setup/deploy.md) explains each piece.
+
+After deploying, `uv run python -m scripts.smoke --base https://<render-url>` checks health, the DB, that `/api` and `/internal/tick` refuse unauthenticated calls, and (with `SMOKE_API_TOKEN` set, plus `--approve-demo`) one demo message end to end.
 
 - [`render.yaml`](render.yaml) is a Render Blueprint:
   - **Free** plan, **Singapore**, Docker, 1 instance

@@ -11,6 +11,7 @@ import httpx
 import pytest
 from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.main import create_app
@@ -138,3 +139,107 @@ async def test_work_on_demand_off_leaves_jobs_for_the_next_tick(engine: AsyncEng
         await _idle(app)
         (item,) = await _feed(client)
         assert item["agent_status"] == "pending"
+
+
+# ------------------------------------------------- Sync now / dashboard open, with loops off
+
+
+async def _poll_age_s(engine: AsyncEngine, source: str = "demo") -> float | None:
+    async with engine.connect() as conn:
+        age = (
+            await conn.execute(
+                text(
+                    "SELECT EXTRACT(EPOCH FROM now() - s.last_poll_started_at) FROM sync_state s "
+                    "JOIN connector_accounts a ON a.id = s.connector_account_id "
+                    "WHERE a.source = :src"
+                ),
+                {"src": source},
+            )
+        ).scalar_one()
+    return None if age is None else float(age)
+
+
+async def _age_last_poll(engine: AsyncEngine, seconds: int, source: str = "demo") -> None:
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE sync_state s SET last_poll_started_at = now() - make_interval(secs => :s) "
+                "FROM connector_accounts a WHERE a.id = s.connector_account_id AND a.source = :src"
+            ),
+            {"s": seconds, "src": source},
+        )
+
+
+async def test_sync_now_polls_immediately_without_loops(engine: AsyncEngine) -> None:
+    async with app_without_loops(demo_mode=True) as (app, client):
+        await app.state.runtime.runner.tick()  # first poll; the next one is ~20 min away
+        await _age_last_poll(engine, 600)
+        r = await client.post("/api/connectors/demo/sync")
+        assert r.status_code == 202
+        await _idle(app)
+        age = await _poll_age_s(engine)
+        assert age is not None
+        assert age < 30  # polled now, not at the next cron tick
+
+
+async def test_sync_now_during_a_running_tick_is_polled_before_the_tick_ends(
+    engine: AsyncEngine,
+) -> None:
+    async with app_without_loops(demo_mode=True) as (app, client):
+        runner = app.state.runtime.runner
+        await runner.tick()  # demo is now not due for ~20 min
+        real_sched, real_worker = runner.scheduler.tick, runner.worker.tick
+        calls = {"scheduler": 0}
+        entered, release = asyncio.Event(), asyncio.Event()
+        first = True
+
+        async def counting_scheduler() -> int:
+            calls["scheduler"] += 1
+            return int(await real_sched())
+
+        async def slow_first_drain() -> int:
+            nonlocal first
+            if first:  # hold the tick in its drain phase (scheduler phase already done)
+                first = False
+                entered.set()
+                await release.wait()
+            return int(await real_worker())
+
+        runner.scheduler.tick = counting_scheduler
+        runner.worker.tick = slow_first_drain
+        task = asyncio.create_task(runner.tick())
+        await entered.wait()
+        assert (await client.post("/api/connectors/demo/sync")).status_code == 202
+        release.set()
+        result = await task
+        assert calls["scheduler"] == 2  # the running tick polled again
+        assert result.polled == 1  # ... and this time demo was due
+
+
+async def test_opening_the_dashboard_polls_active_connectors_at_most_once_a_minute(
+    engine: AsyncEngine,
+) -> None:
+    async with app_without_loops(demo_mode=True) as (app, client):
+        await app.state.runtime.runner.tick()  # just polled
+
+        r = await client.post("/api/connectors/poll-now")
+        assert r.status_code == 202
+        assert r.json() == {"polling": []}  # polled < 60 s ago: skipped
+
+        await _age_last_poll(engine, 120)
+        assert (await client.post("/api/connectors/poll-now")).json() == {"polling": ["demo"]}
+        await _idle(app)
+        age = await _poll_age_s(engine)
+        assert age is not None
+        assert age < 30
+
+        await client.patch("/api/connectors/demo", json={"enabled": False})
+        await _idle(app)
+        await _age_last_poll(engine, 120)
+        assert (await client.post("/api/connectors/poll-now")).json() == {"polling": []}
+
+
+async def test_poll_now_needs_the_api_token(engine: AsyncEngine) -> None:
+    async with app_without_loops() as (_, client):
+        r = await client.post("/api/connectors/poll-now", headers={"Authorization": ""})
+        assert r.status_code == 401

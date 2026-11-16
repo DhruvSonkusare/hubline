@@ -36,7 +36,7 @@ jobs:
       - run: uv run pytest
 
   frontend:
-    # Not run yet: GitHub is on hold (plan R11). Same commands as locally.
+    # Same commands as locally.
     runs-on: ubuntu-latest
     defaults:
       run:

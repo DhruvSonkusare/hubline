@@ -918,6 +918,23 @@
         "title": "OAuthStartOut",
         "type": "object"
       },
+      "PollNowOut": {
+        "description": "Connectors marked due by POST /api/connectors/poll-now (dashboard opened).",
+        "properties": {
+          "polling": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Polling",
+            "type": "array"
+          }
+        },
+        "required": [
+          "polling"
+        ],
+        "title": "PollNowOut",
+        "type": "object"
+      },
       "RedraftIn": {
         "properties": {
           "instructions": {
@@ -1294,6 +1311,33 @@
           }
         ],
         "summary": "List Connectors",
+        "tags": [
+          "connectors"
+        ]
+      }
+    },
+    "/api/connectors/poll-now": {
+      "post": {
+        "description": "The dashboard was opened: poll every active connector now (in production the loops are\noff, so otherwise new mail waits for the next cron tick). Connectors polled in the last\nDASHBOARD_POLL_MIN_AGE_S seconds, or being polled right now, are skipped. DB clock only.",
+        "operationId": "poll_now_api_connectors_poll_now_post",
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PollNowOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Poll Now",
         "tags": [
           "connectors"
         ]

@@ -59,7 +59,8 @@ class WorkRunner:
         self.scheduler_loop = scheduler_loop
         self.worker_loop = worker_loop
         self._lock = asyncio.Lock()
-        self._rerun = False  # work arrived while a pass was running
+        self._rerun = False  # agent work arrived while a pass was running
+        self._rescan = False  # a connector became due while a pass was running (Sync now)
         self._tasks: set[asyncio.Task[Any]] = set()
         self._stopping = False
 
@@ -69,12 +70,21 @@ class WorkRunner:
         """One scheduler pass, then drain agent jobs until done or `budget_s` has elapsed."""
         if self._lock.locked():
             self._rerun = True
+            self._rescan = True  # the running pass polls again before it finishes
             return TickResult(0, 0, 0.0, "busy")
         start = time.monotonic()
         deadline = start + (budget_s or self.settings.tick_budget_s)
         async with self._lock:
+            self._rescan = False
             polled = await self.scheduler.tick()
             jobs, stopped = await self._drain(deadline)
+            # "Sync now" / dashboard open during this pass: its scheduler phase may be over,
+            # so poll once more instead of leaving the connector due until the next cron tick.
+            while self._rescan and time.monotonic() < deadline:
+                self._rescan = False
+                polled += await self.scheduler.tick()
+                more, stopped = await self._drain(deadline)
+                jobs += more
         result = TickResult(polled, jobs, round(time.monotonic() - start, 2), stopped)
         log.info("tick_done", **result.as_dict())
         return result
@@ -107,7 +117,10 @@ class WorkRunner:
         if self.scheduler_loop:
             self.wakeups.scheduler.set()
         elif self.settings.work_on_demand:
-            self._spawn(self.tick())
+            if self._lock.locked():
+                self._rescan = True  # the running pass picks it up before finishing
+            else:
+                self._spawn(self.tick())
 
     async def _drain_once(self) -> None:
         async with self._lock:

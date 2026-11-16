@@ -1,5 +1,5 @@
-# Render Blueprint for the Hubline backend ($0: Render Free, Singapore). Plan R6/R9, docs/setup/deploy.md.
-# PREPARED, NOT DEPLOYED: Render deploys from a GitHub repo, which is on hold (R11).
+# Render Blueprint for the Hubline backend ($0: Render Free, Singapore). Plan R6/R9, docs/setup/deploy.md
+# and reports/step-4-plan.md (click-by-click).
 #
 # Render -> New -> Blueprint -> pick the repo. Every `sync: false` key is prompted ONCE at creation
 # (later Blueprint syncs ignore them; edit them in the service's Environment tab instead).
@@ -80,6 +80,8 @@ services:
         value: Asia/Kolkata
       - key: BACKFILL_AUTO_TRIAGE
         value: "10"
-      # --- Step 5 (real connectors) adds, all `sync: false`:
-      #   CREDENTIALS_ENCRYPTION_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
-      #   SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, SLACK_SIGNING_SECRET
+      # --- Real connectors (Slack + Gmail, Step 4 Phase B). Deliberately NOT Blueprint keys: a
+      # dummy value would make the connectors look configured. Add them in the service's
+      # Environment tab when connecting the apps:
+      #   CREDENTIALS_ENCRYPTION_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, SLACK_SIGNING_SECRET
+      # (Slack uses a pasted user token, so there is no SLACK_CLIENT_ID / SLACK_CLIENT_SECRET.)

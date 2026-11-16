@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { logoutAction } from "@/app/actions";
+import { PollOnOpen } from "@/components/PollOnOpen";
 import { ToastProvider } from "@/components/Toast";
 import { WakingScreen } from "@/components/WakingScreen";
 import { api, backendHealthy, type MessageStats } from "@/lib/backend";
@@ -18,6 +19,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   }
   return (
     <ToastProvider>
+      {healthy && <PollOnOpen />}
       <div className="flex min-h-screen">
         <aside className="sticky top-0 flex h-screen w-60 shrink-0 flex-col border-r border-slate-200 bg-white px-4 py-5">
           <Link href="/inbox" className="mb-8 flex items-center gap-2.5 px-2">

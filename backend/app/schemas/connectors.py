@@ -50,6 +50,12 @@ class SyncScheduled(BaseModel):
     status: str = "scheduled"
 
 
+class PollNowOut(BaseModel):
+    """Connectors marked due by POST /api/connectors/poll-now (dashboard opened)."""
+
+    polling: list[str]
+
+
 class SampleIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

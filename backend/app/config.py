@@ -56,6 +56,9 @@ class Settings(DatabaseSettings):
     work_on_demand: bool = True  # loops off: API actions run one scheduler/agent pass
     tick_secret: SecretStr | None = None  # enables POST /internal/tick (X-Tick-Secret header)
     tick_budget_s: float = Field(default=60.0, gt=0, le=600)  # max agent drain per tick
+    # Opening the dashboard polls every active connector not polled in the last N seconds
+    # (POST /api/connectors/poll-now). A user action, never periodic: Neon can still sleep.
+    dashboard_poll_min_age_s: int = Field(default=60, ge=0, le=3600)
     tick_on_startup: bool = False  # run one tick when the process starts (Render cold start)
     scheduler_batch_size: int = Field(default=5, ge=1, le=50)
     poll_lease_s: int = Field(default=120, ge=10)

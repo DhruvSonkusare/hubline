@@ -30,6 +30,13 @@ Both are Part 1 item 6. Slack DMs arrive in seconds through the webhook once Ren
 ---
 
 ## Part 1 — what I build before you click anything
+> **Done (2026-11-16).** All 7 items are built and pushed.
+> - Backend: 376 passed, 6 skipped; ruff, format and mypy clean.
+> - Frontend: lint, typecheck, 37 Vitest tests, build and 2 e2e tests pass.
+> - `scripts.smoke` passed against a local production-like backend (loops off, tick secret set): public checks, the token checks, and a demo message end to end. A wrong token fails it.
+> - The new test for "Sync now during a running tick" fails on the old runner code and passes on the new.
+> - **Your clicks start at Part 2, step 1 (Neon).**
+
 Small changes, all tested, committed and pushed as "Step 4 deploy prep". Render and Vercel then deploy the right files.
 
 1. **`backend/scripts/smoke.py`** (in the plan's Step 4 file list, not written yet). `uv run python -m scripts.smoke --base https://<render-url>` checks:

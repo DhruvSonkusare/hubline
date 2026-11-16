@@ -2,19 +2,19 @@
 
 Hubline is a single-user unified inbox. Connector plug-ins ingest messages from Gmail, Slack, Teams, LinkedIn and X into Postgres. A LangGraph agent scores priority (1–5), summarises each message and drafts a reply. A human approves every reply on a Next.js dashboard, and the reply goes out through the original app.
 
-The full approved plan is **[docs/PLAN.md](docs/PLAN.md)**. Its "Revisions" (R1–R14) and "Decisions" tables override the original sections.
+The full approved plan is **[docs/PLAN.md](docs/PLAN.md)**. Its "Revisions" (R1–R15) and "Decisions" tables override the original sections.
 
 > **HARD REQUIREMENT: the whole project runs at $0.**
 > - Only free tiers: Render Free, Vercel Hobby, Neon Free, Groq/Gemini free LLM tiers, GitHub Actions cron on the public repo.
 > - Never add a paid service, plan, API or default.
 > - Never make paid API calls (e.g. Anthropic) without the user explicitly asking.
 
-> **GITHUB ON HOLD (R11):** commit locally only. Do not push, add a remote, or ask for a repo URL until the user says GitHub is back.
+> **GitHub (R15):** the repo is <https://github.com/DhruvSonkusare/hubline> (public, `origin`). Commit or push **only when the user asks**. Commits use the GitHub noreply email. Never commit secrets, `.env` files, or private data (scan before pushing).
 
 ## Build process (MANDATORY)
 
 - We build in **7 steps** (plan §9). Work on **one step only**, the one the user asked for.
-- **Step order (R13):** Step 5 (Slack + Gmail) is built and run locally before Step 4 deploys; Step 4 waits for GitHub.
+- **Step order (R13, R15):** Step 5 (Slack + Gmail) was built and verified locally first. Step 4 now deploys: Phase A (demo data), then Phase B (real Slack + Gmail, production Slack app "Hubline"). Plan: `reports/step-4-plan.md`.
 - **Step 7 (R14, planned, not built):** self-hosting and a public read-only demo.
   - A Deploy to Render button and `docs/self-hosting.md` (all free tiers).
   - A demo login that sees only `is_demo` data, with every mutation blocked **on the backend**.
@@ -44,8 +44,8 @@ The full approved plan is **[docs/PLAN.md](docs/PLAN.md)**. Its "Revisions" (R1�
   - **Job priority** (`agent_jobs.priority`, claimed highest first): dashboard actions 20 > live messages 10 > backfill 0.
   - Prompts are clipped (body 2,000 chars, thread 3×300). Output caps: 400 tokens (triage), 600 (draft).
 - **Background work (R3, R9):** the scheduler and agent worker live inside the backend process. Work is claimed with `SELECT … FOR UPDATE SKIP LOCKED` plus a lease.
-  - **Local:** the loops run, idling up to `*_IDLE_MAX_S` (600s, above Neon's 5-min suspend).
-  - **Production (Render Free):** the loops are **off**. Work runs only through `POST /internal/tick` (`X-Tick-Secret`; one scheduler pass + ≤60s agent drain, called by the GitHub Actions cron every 30 min), `TICK_ON_STARTUP`, and on-demand kicks from API actions (`WorkRunner`, `app/workers/runner.py`).
+  - **Local:** the loops run, idling up to `*_IDLE_MAX_S` (600s, above Neon's 5-min suspend). `LLM_PROVIDER=fake` by default; `groq` only while testing.
+  - **Production (Render Free):** the loops are **off**. Work runs only through `POST /internal/tick` (`X-Tick-Secret`; one scheduler pass + ≤60s agent drain, called by the GitHub Actions cron every 30 min), `TICK_ON_STARTUP`, and on-demand kicks from API actions (`WorkRunner`, `app/workers/runner.py`): Sync now, enabling a connector, webhooks, and opening the dashboard (`POST /api/connectors/poll-now`, throttled per connector by `DASHBOARD_POLL_MIN_AGE_S`).
   - **Never add anything that queries the DB periodically in production:** Neon Free (100 CU-h) must stay well under its limit.
   - **Scheduling times use the DB clock** (`func.now()`), never the app host's clock.
 - **Frontend:** Next.js App Router + TypeScript + Tailwind on Vercel (functions in `sin1`). Auth.js login with providers chosen **by env vars only** (R12): a single-password Credentials provider (`DASHBOARD_PASSWORD`, constant-time compare) now; GitHub OAuth (`AUTH_PROVIDERS=github`) later, with no code change. BFF pattern: the browser talks only to Next.js; the Next.js server calls the backend with `BACKEND_API_TOKEN`. No secrets in `NEXT_PUBLIC_*`.

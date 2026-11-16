@@ -1,6 +1,6 @@
 # Unified Alerts Hub (repo: `Hubline`) — Project Plan
 
-> **Status: APPROVED (2026-11-09) with revisions R1–R14 below.** This file is `docs/PLAN.md`, the source of truth.
+> **Status: APPROVED (2026-11-09) with revisions R1–R15 below.** This file is `docs/PLAN.md`, the source of truth.
 > **Hard requirement (R6): the whole project runs at $0.** No paid service, plan or API is used anywhere.
 > Any change to it is recorded in the step report that makes the change.
 
@@ -22,6 +22,7 @@
 | R12 | **Dashboard login uses a password for now.** It is an Auth.js **Credentials** provider with a single password, `DASHBOARD_PASSWORD` in `frontend/.env.local`.<ul><li>The password is compared in constant time (SHA-256 of both values, then `crypto.timingSafeEqual`).</li><li>Sessions use the same stateless JWT and `httpOnly`, `Secure`, `SameSite=Lax` cookie.</li><li>`auth.ts` builds its provider list from env vars only: `AUTH_PROVIDERS=password` (default), `github` or `password,github`.</li><li>GitHub needs `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET` and `ALLOWED_GITHUB_LOGINS`. **Switching to GitHub OAuth later is an env-var change only**; no code changes.</li></ul> |
 | R13 | **Step order swapped while GitHub is on hold (2026-11-10).** Step 4's deploy files are prepared now (`render.yaml`, `backend/Dockerfile`, `backend/.dockerignore`, `frontend/vercel.json`, `docs/setup/deploy.md`), but nothing is deployed. **Step 5 (Slack + Gmail) is built and verified LOCALLY first**, before Step 4 deploys:<ul><li>Slack events reach the PC through a free cloudflared quick tunnel (no account). Its URL changes every run and is pasted into the Slack app each session.</li><li>Gmail uses 60s polling plus OAuth to the exact redirect `http://localhost:8000/oauth/gmail/callback`.</li></ul>Step 4 deploys once GitHub is back; production URLs for the connectors are listed in `docs/setup/deploy.md`. Plan: `reports/step-5-plan.md`. |
 | R14 | **Step 7 added: self-hosting and a public demo (decision "Option A", 2026-11-16).** Planned only, built after Step 6. Anyone can run their own Hubline on free tiers, and a public read-only demo login shows only `is_demo` data.<ul><li>**Hubline stays single-user per deployment.** No multi-tenant sign-up, no users table: each self-hoster runs their own copy with their own accounts and keys.</li><li>The demo login extends Decision 1: the owner still logs in as before, and the demo viewer can never see real connectors or messages, or approve and send.</li></ul> |
+| R15 | **GitHub is back (2026-11-16); R11 is lifted.** Repo <https://github.com/DhruvSonkusare/hubline> (public), pushed after a full-history secret scan and a one-time rewrite (Neon dev host redacted, author email set to the GitHub noreply address). Commit or push only when asked. **Step 4 now includes Phase B:** real Slack + Gmail in production, with a separate production Slack app "Hubline" ("Hubline Dev" stays local). **Production polling:** Gmail is polled on each 30-min tick, **and** immediately when the dashboard is opened (`POST /api/connectors/poll-now`, skipping connectors polled in the last `DASHBOARD_POLL_MIN_AGE_S`=60 s) or **Sync now** is clicked. No periodic DB work is added. **Local LLM default is `fake` again**; switch to `groq` only while testing (local and production share Groq's free limits). Plan: `reports/step-4-plan.md`. |
 
 ## Decisions (answers to the §12 questions)
 
@@ -46,7 +47,7 @@
 - **Local dev:** the loops can stay on. Idle sleeps default to 600s (above 300s), so an idle app still lets the DB sleep.
 - **Responsiveness:** API actions (toggle, sync, sample, webhook) either wake the loops through an in-process event or, with the loops off, run one pass in the background. Long idle sleeps therefore never make the UI feel slow.
 
-> Sections 1–12 below are the original plan. Where they conflict with R1–R14 or the decisions above, R1–R14 and the decisions win. §6 (LLM), §8 (deployment), §9 Step 4 and §11 have been rewritten for R6–R10.
+> Sections 1–12 below are the original plan. Where they conflict with R1–R15 or the decisions above, R1–R15 and the decisions win. §6 (LLM), §8 (deployment), §9 Step 4 and §11 have been rewritten for R6–R10.
 
 ## Context
 
@@ -974,7 +975,7 @@ Then I stop and wait for you.
   - All backend and frontend checks are green.
 - **You set up by hand:** `frontend/.env.local` with `DASHBOARD_PASSWORD` (≥ 16 random characters), `AUTH_SECRET`, `BACKEND_URL`, `BACKEND_API_TOKEN` (R12; no GitHub OAuth App while GitHub is on hold). The detailed Step 3 plan is in `reports/step-3-plan.md`.
 
-### Step 4 — Deploy the whole thing at $0 (demo data only)
+### Step 4 — Deploy the whole thing at $0 (Phase A demo data; Phase B real Slack + Gmail, R15)
 - **Goal:** a live, login-protected demo on **Vercel Hobby + Render Free + Neon Free (`main`)**, with the **GitHub Actions tick cron**, before any real accounts are connected. This proves the free deploy path and gives the public HTTPS URL that Step 5's webhooks need.
 - **Files:**
   - `backend/Dockerfile`, `.dockerignore`

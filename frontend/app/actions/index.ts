@@ -93,6 +93,11 @@ export async function syncConnector(key: string) {
   return guarded(() => api.syncConnector(key));
 }
 
+/** Called once when the dashboard opens, so new mail doesn't wait for the 30-min cron tick. */
+export async function pollOnOpen() {
+  return guarded(() => api.pollNow());
+}
+
 export async function saveConnectorSettings(key: string, settings: Record<string, unknown>) {
   return guarded(() => api.patchConnector(key, { settings }));
 }

@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_runtime, get_session
@@ -19,6 +19,7 @@ from app.schemas.connectors import (
     ConnectorPatch,
     CredentialsIn,
     OAuthStartOut,
+    PollNowOut,
     SampleIn,
     SampleOut,
     ScenarioList,
@@ -26,7 +27,12 @@ from app.schemas.connectors import (
     TokenFieldOut,
 )
 from app.services import connect
-from app.services.connector_runtime import allowed_by_env, build_connector, missing_settings
+from app.services.connector_runtime import (
+    allowed_by_env,
+    build_connector,
+    missing_settings,
+    pollable_sources,
+)
 from app.services.ingest import ingest_messages
 from app.services.jobs import PRIORITY_USER
 from app.workers.runner import WorkRunner
@@ -170,6 +176,44 @@ async def patch_connector(
     if wake:
         _runner(runtime).kick_scheduler()
     return _to_out(account, state, runtime)
+
+
+_POLL_NOW_SQL = text(
+    """
+    UPDATE sync_state AS s
+       SET next_poll_at = now(), updated_at = now()
+      FROM connector_accounts AS a
+     WHERE a.id = s.connector_account_id
+       AND a.enabled AND a.status = 'connected' AND a.source = ANY(:sources)
+       AND s.next_poll_at > now()
+       AND (s.lease_until IS NULL OR s.lease_until < now())
+       AND (s.last_poll_started_at IS NULL
+            OR s.last_poll_started_at < now() - make_interval(secs => :min_age))
+    RETURNING a.source
+    """
+)
+
+
+@router.post("/poll-now", response_model=PollNowOut, status_code=202)
+async def poll_now(
+    session: AsyncSession = Depends(get_session),
+    runtime: Runtime = Depends(get_runtime),
+) -> PollNowOut:
+    """The dashboard was opened: poll every active connector now (in production the loops are
+    off, so otherwise new mail waits for the next cron tick). Connectors polled in the last
+    DASHBOARD_POLL_MIN_AGE_S seconds, or being polled right now, are skipped. DB clock only."""
+    sources = pollable_sources(runtime.settings)
+    polling: list[str] = []
+    if sources:
+        rows = await session.execute(
+            _POLL_NOW_SQL,
+            {"sources": sources, "min_age": float(runtime.settings.dashboard_poll_min_age_s)},
+        )
+        polling = sorted(r[0] for r in rows)
+        await session.commit()
+    if polling:
+        _runner(runtime).kick_scheduler()
+    return PollNowOut(polling=polling)
 
 
 @router.post("/{key}/sync", response_model=SyncScheduled, status_code=202, responses=_ERRORS)

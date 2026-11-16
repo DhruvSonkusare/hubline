@@ -21,6 +21,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/connectors/poll-now": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Poll Now
+         * @description The dashboard was opened: poll every active connector now (in production the loops are
+         *     off, so otherwise new mail waits for the next cron tick). Connectors polled in the last
+         *     DASHBOARD_POLL_MIN_AGE_S seconds, or being polled right now, are skipped. DB clock only.
+         */
+        post: operations["poll_now_api_connectors_poll_now_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/connectors/{key}": {
         parameters: {
             query?: never;
@@ -700,6 +722,14 @@ export interface components {
             /** Authorize Url */
             authorize_url: string;
         };
+        /**
+         * PollNowOut
+         * @description Connectors marked due by POST /api/connectors/poll-now (dashboard opened).
+         */
+        PollNowOut: {
+            /** Polling */
+            polling: string[];
+        };
         /** RedraftIn */
         RedraftIn: {
             /** Instructions */
@@ -876,6 +906,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    poll_now_api_connectors_poll_now_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PollNowOut"];
                 };
             };
         };
