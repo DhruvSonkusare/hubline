@@ -194,6 +194,25 @@ async def test_oauth_callback_connects_gmail_and_redirects_to_the_dashboard(
     assert again.headers["location"].endswith("error=invalid_state&connector=gmail")
 
 
+async def test_reconnect_preselects_the_connected_gmail_account(
+    connector_client: httpx.AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    first = await start_gmail(connector_client)
+    assert "login_hint" not in first  # never connected: the user picks the account
+    q = await start_gmail(connector_client)
+    await callback(connector_client, code="4/the-code", state=q["state"])
+
+    assert (await start_gmail(connector_client))["login_hint"] == p.GMAIL_ME  # connected
+    async with sessionmaker() as s, s.begin():
+        await s.execute(text("UPDATE connector_accounts SET status = 'needs_reauth'"))
+    assert (await start_gmail(connector_client))["login_hint"] == p.GMAIL_ME  # login expired
+
+    with respx.mock(assert_all_called=False) as router:
+        router.post("https://oauth2.googleapis.com/revoke").mock(return_value=Response(200))
+        await connector_client.post("/api/connectors/gmail/disconnect")
+    assert "login_hint" not in await start_gmail(connector_client)  # after Disconnect: no hint
+
+
 @pytest.mark.parametrize(
     ("params", "error"),
     [
@@ -262,6 +281,9 @@ async def test_disconnect_revokes_deletes_credentials_and_disables(
 ) -> None:
     await paste_slack_token(connector_client)
     await connector_client.patch("/api/connectors/slack", json={"enabled": True})
+    async with sessionmaker() as s, s.begin():  # an error left over from the old account
+        await s.execute(text("UPDATE connector_accounts SET last_error = 'token revoked'"))
+        await s.execute(text("UPDATE sync_state SET last_error = 'token revoked'"))
     with respx.mock(assert_all_called=False) as router:
         revoke = router.post("https://slack.com/api/auth.revoke").mock(
             return_value=Response(200, json={"ok": True, "revoked": True})
@@ -272,9 +294,14 @@ async def test_disconnect_revokes_deletes_credentials_and_disables(
     assert out["status"] == "disconnected"
     assert out["enabled"] is False
     assert out["account_identity"] is None
+    assert out["last_error"] is None
     assert revoke.call_count == 1
     async with sessionmaker() as s:
         assert (await s.execute(select(ConnectorCredential))).first() is None
+    account = await get_account(sessionmaker, "slack")
+    assert account.self_ids == []
+    assert account.last_error is None
+    assert (await get_state(sessionmaker, "slack")).last_error is None
 
 
 async def test_disconnect_still_works_when_revoke_fails(

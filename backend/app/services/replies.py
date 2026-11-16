@@ -124,13 +124,19 @@ async def approve_and_send(
         account = await session.get(ConnectorAccount, msg.connector_account_id)
         assert account is not None
         try:
-            desc = registry.get(msg.source).describe()
+            connector_cls = registry.get(msg.source)
         except registry.UnknownConnectorError:
             raise ApiError(503, "connector_unavailable", f"{msg.source} is not installed") from None
+        desc = connector_cls.describe()
         if not desc.can_send:
             raise ApiError(
                 409, "connector_read_only", f"{desc.display_name} is read-only: copy the draft"
             )
+        blocked = connector_cls.reply_blocked_reason(
+            sender_id=msg.sender_id, reply_meta=dict(msg.reply_meta or {})
+        )
+        if blocked:
+            raise ApiError(409, "reply_blocked", blocked)
         if msg.status == "replied":
             raise ApiError(409, "already_replied", "this message has already been answered")
         if msg.status != "open":

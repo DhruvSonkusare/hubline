@@ -558,6 +558,17 @@
             "title": "Replies",
             "type": "array"
           },
+          "send_blocked_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Send Blocked Reason"
+          },
           "sender": {
             "$ref": "#/components/schemas/SenderOut"
           },

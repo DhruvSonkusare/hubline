@@ -49,6 +49,28 @@ def test_bulk_rule(sender: str, headers: dict[str, str], expected: bool) -> None
     assert is_bulk_automated(sender, headers) is expected
 
 
+@pytest.mark.parametrize(
+    "sender",
+    [
+        "notification@slack.com",
+        "notifications@github.com",
+        "no-reply@x.example",
+        "noreply@x.example",
+    ],
+)
+def test_prefilter_no_reply_sender_is_automated_without_llm(sender: str) -> None:
+    out = prefilter(state(sender_id=sender))  # no List-Unsubscribe / Precedence needed
+    assert out["triage_by"] == "rules"
+    assert out["triage"].priority == 1
+    assert out["triage"].category == "automated"
+    assert out["triage"].needs_reply is False  # -> route ends, no draft
+    assert "no-reply" in out["triage"].reason
+
+
+def test_prefilter_human_sender_still_goes_to_the_llm() -> None:
+    assert prefilter(state(sender_id="priya@notifications.example.com")) == {}
+
+
 def test_prefilter_passes_normal_and_redraft() -> None:
     assert prefilter(state()) == {}
     assert prefilter(state(kind="redraft", body="")) == {}

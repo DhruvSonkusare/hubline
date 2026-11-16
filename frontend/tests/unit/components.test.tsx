@@ -82,6 +82,18 @@ describe("DraftPanel", () => {
     expect(screen.getByText(/LinkedIn is read-only in Hubline/)).toBeInTheDocument();
   });
 
+  it("explains why sending is off for a no-reply sender", () => {
+    panel({
+      canSend: false,
+      sourceDisplay: "Gmail",
+      sendBlockedReason:
+        "notification@slack.com is an automated no-reply sender; Hubline never replies to it",
+    });
+    expect(screen.queryByRole("button", { name: /Approve and send/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/Sending is off for this message: notification@slack.com/)).toBeInTheDocument();
+    expect(screen.queryByText(/read-only in Hubline/)).not.toBeInTheDocument();
+  });
+
   it("puts unchecked open questions inside the send confirmation", () => {
     panel();
     fireEvent.click(screen.getAllByRole("checkbox")[0]); // first one handled

@@ -175,12 +175,23 @@ async def start_oauth(session: AsyncSession, settings: Settings, key: str) -> st
             expires_at=func.now() + timedelta(seconds=settings.oauth_state_ttl_s),
         )
     )
+    account = (
+        await session.execute(select(ConnectorAccount).where(ConnectorAccount.source == key))
+    ).scalar_one_or_none()
+    # Reconnect (connected, or the login expired): ask the provider to preselect the same
+    # account, so a 7-day re-login can't silently switch to another mailbox.
+    hint = (
+        account.account_identity
+        if account is not None and account.status in ("connected", "needs_reauth")
+        else None
+    )
     await session.commit()
     return cls.authorize_url(
         state=state,
         code_challenge=challenge,
         redirect_uri=redirect_uri(settings, key),
         app_settings=settings,
+        login_hint=hint,
     )
 
 
@@ -274,11 +285,20 @@ async def disconnect(
         account.status = "not_configured" if missing_settings(desc, settings) else "disconnected"
         account.enabled = False
         account.account_identity = None
+        account.self_ids = []  # the old account's addresses no longer mean "me"
         account.connected_at = None
+        account.last_error = None  # an error about the old account isn't useful any more
+        account.last_error_at = None
         account.updated_at = func.now()
         await session.execute(
             update(SyncState)
             .where(SyncState.connector_account_id == account.id)
-            .values(cursor=None, lease_until=None, consecutive_failures=0, updated_at=func.now())
+            .values(
+                cursor=None,
+                lease_until=None,
+                consecutive_failures=0,
+                last_error=None,
+                updated_at=func.now(),
+            )
         )
     log.info("connector_disconnected", source=key)

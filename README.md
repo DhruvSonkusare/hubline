@@ -12,7 +12,7 @@ One inbox for every alert. Hubline pulls messages from Gmail, Slack, Microsoft T
 | LLM | Groq free tier (Gemini free tier optional) |
 | Cron | GitHub Actions on this public repo |
 
-> **Status: Step 5 of 7 built, locally (Slack + Gmail live).** The backend and dashboard run on your PC. Real Slack DMs, group DMs and @mentions arrive within a second through a cloudflared tunnel. Gmail inbox mail arrives within about 60 s. Groq triages each message and drafts replies. Slack replies you approve post into the right DM or thread; the live Gmail reply is still to be confirmed (see [reports/step-5-report.md](reports/step-5-report.md)). Deploying (Step 4) waits for GitHub (on hold). See [docs/PLAN.md](docs/PLAN.md) and the [Step 3 screenshots](reports/step-3-screenshots/).
+> **Status: Step 5 of 7 complete, locally (Slack + Gmail live).** The backend and dashboard run on your PC. Real Slack DMs, group DMs and @mentions arrive within a second through a cloudflared tunnel. Gmail inbox mail arrives within about 60 s. Groq triages each message and drafts replies. Replies you approve go out through the original app, into the same Slack DM or thread and the same Gmail conversation. Mail from no-reply and notification senders is set to priority 1 and can't be answered. Deploying (Step 4) waits for GitHub (on hold). See [reports/step-5-report.md](reports/step-5-report.md), [docs/PLAN.md](docs/PLAN.md) and the [Step 3 screenshots](reports/step-3-screenshots/).
 
 | Step | What it adds | Status |
 |---|---|---|
@@ -20,7 +20,7 @@ One inbox for every alert. Hubline pulls messages from Gmail, Slack, Microsoft T
 | 2 | LangGraph agent worker: priority, summary, drafts | ✅ done |
 | 3 | Full API + Next.js dashboard (local) | ✅ done |
 | 4 | Deploy at $0: Vercel Hobby + Render Free + Neon Free (Singapore) + tick cron | 🧰 files prepared; deploy waits for GitHub |
-| 5 | Slack + Gmail live (locally first: cloudflared tunnel + localhost OAuth) | ✅ built; Slack verified live, Gmail reply still to confirm |
+| 5 | Slack + Gmail live (locally first: cloudflared tunnel + localhost OAuth) | ✅ done (verified live) |
 | 6 | Teams, LinkedIn/X (read-only), hardening, demo script | ⏳ |
 | 7 | Self-hosting (Deploy to Render button, guide, setup check), public read-only demo, publish-safe repo | 📝 planned (R14) |
 
@@ -158,6 +158,8 @@ Both connect from the dashboard's **Connectors** page. Their tokens are stored e
 - **Gmail:** [docs/setup/gmail.md](docs/setup/gmail.md).
   - OAuth with PKCE to `http://localhost:8000/oauth/gmail/callback`, polling every 60 s with `history.list`.
   - Replies go to `Reply-To`, else `From`, in the same thread.
+  - Mail from no-reply or notification senders (`noreply@`, `no-reply@`, `notification@`, `notifications@`, …) is set to priority 1 with no draft, and sending to it is blocked.
+  - The card shows **Connected as <address>**, and Reconnect preselects that account on Google's screen.
   - In Google's Testing mode the login lasts **7 days**. Click **Reconnect Gmail** before then.
 - **Disconnect** revokes the token at the provider and deletes it locally. Message history stays.
 

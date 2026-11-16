@@ -17,6 +17,7 @@ from urllib.parse import urlencode
 
 import httpx
 
+from app.addresses import is_no_reply_address
 from app.config import Settings
 from app.connectors._util.mail import (
     build_reply,
@@ -56,8 +57,19 @@ MAX_PER_POLL = 50
 FALLBACK_DAYS = 1
 
 
-class _NotFoundError(Exception):
-    pass
+class _NotFoundError(PermanentConnectorError):
+    """Gmail answered 404 (an expired history id, a deleted message or thread)."""
+
+
+def _google_error(resp: httpx.Response) -> str:
+    """`NOT_FOUND Requested entity was not found.` from Google's JSON error body, else ''."""
+    try:
+        err = resp.json().get("error", {})
+    except ValueError:
+        return ""
+    if not isinstance(err, dict):
+        return str(err)[:200]
+    return " ".join(str(x) for x in (err.get("status"), err.get("message")) if x)[:200]
 
 
 def _expires_at(expires_in: Any, now: datetime) -> datetime:
@@ -84,7 +96,13 @@ class GmailConnector(Connector, OAuthConnectMixin):
 
     @classmethod
     def authorize_url(
-        cls, *, state: str, code_challenge: str, redirect_uri: str, app_settings: Settings
+        cls,
+        *,
+        state: str,
+        code_challenge: str,
+        redirect_uri: str,
+        app_settings: Settings,
+        login_hint: str | None = None,
     ) -> str:
         params = {
             "client_id": app_settings.google_client_id or "",
@@ -97,6 +115,9 @@ class GmailConnector(Connector, OAuthConnectMixin):
             "code_challenge": code_challenge,
             "code_challenge_method": "S256",
         }
+        if login_hint and "@" in login_hint:
+            # Reconnect: Google preselects the connected account (the user can still switch).
+            params["login_hint"] = login_hint
         return f"{AUTH_URL}?{urlencode(params)}"
 
     @classmethod
@@ -240,10 +261,20 @@ class GmailConnector(Connector, OAuthConnectMixin):
                 token = await self._refresh()  # access token expired early or was rotated
                 continue
             break
+        if resp.status_code >= 400:
+            # Google's error status/message never contain the token; they say what went wrong.
+            reason = _google_error(resp)
+            self.ctx.log.warning(
+                "gmail_api_error",
+                method=method,
+                url=API + path,
+                status=resp.status_code,
+                reason=reason,
+            )
         if resp.status_code == 401:
             raise AuthExpiredError("Gmail rejected the access token; reconnect Gmail")
         if resp.status_code == 404:
-            raise _NotFoundError(path)
+            raise _NotFoundError(f"Gmail {method} {path}: HTTP 404 {reason}".rstrip())
         if resp.status_code == 429 or (
             resp.status_code == 403 and "rateLimitExceeded" in resp.text
         ):
@@ -252,7 +283,9 @@ class GmailConnector(Connector, OAuthConnectMixin):
         if resp.status_code >= 500:
             raise TransientConnectorError(f"Gmail {path}: HTTP {resp.status_code}")
         if resp.status_code >= 400:
-            raise PermanentConnectorError(f"Gmail {path}: HTTP {resp.status_code}")
+            raise PermanentConnectorError(
+                f"Gmail {method} {path}: HTTP {resp.status_code} {reason}".rstrip()
+            )
         data: dict[str, Any] = resp.json()
         return data
 
@@ -286,6 +319,7 @@ class GmailConnector(Connector, OAuthConnectMixin):
             thread_title=subject or "(no subject)",
             permalink=f"https://mail.google.com/mail/u/0/#all/{thread}",
             reply_meta={
+                "mailbox": self._self(),  # which Gmail account received it (see send())
                 "message_id": headers.get("message-id"),
                 "references": headers.get("references"),
                 "reply_to": reply_recipient(headers),
@@ -367,11 +401,33 @@ class GmailConnector(Connector, OAuthConnectMixin):
 
     # ------------------------------------------------------------------ send
 
+    @classmethod
+    def reply_blocked_reason(cls, *, sender_id: str, reply_meta: Mapping[str, Any]) -> str | None:
+        """Never reply to no-reply or app-notification mail, or to a no-reply Reply-To."""
+        if is_no_reply_address(sender_id):
+            return f"{sender_id} is an automated no-reply sender; Hubline never replies to it"
+        to_addr = str(reply_meta.get("reply_to") or "")
+        if to_addr and is_no_reply_address(to_addr):
+            return f"the reply address {to_addr} is a no-reply address; Hubline never sends to it"
+        return None
+
     async def send(self, thread_id: str, text: str, *, reply_to: ReplyContext) -> SendResult:
         meta = reply_to.reply_meta
+        blocked = self.reply_blocked_reason(sender_id=reply_to.recipient.id, reply_meta=meta)
+        if blocked:
+            raise PermanentConnectorError(blocked)
         to_addr = str(meta.get("reply_to") or reply_to.recipient.id)
         if "@" not in to_addr:
             raise PermanentConnectorError("this email has no address to reply to")
+        if is_no_reply_address(to_addr):
+            raise PermanentConnectorError(f"{to_addr} is a no-reply address; not sending")
+        mailbox = str(meta.get("mailbox") or "").lower()
+        me = self._self()
+        if mailbox and me and mailbox != me:
+            raise PermanentConnectorError(
+                f"this email was received by {mailbox}, but Gmail is now connected as {me}; "
+                f"reconnect Gmail as {mailbox} to reply"
+            )
         raw = build_reply(
             from_addr=self._self(),
             to_addr=to_addr,
@@ -380,9 +436,16 @@ class GmailConnector(Connector, OAuthConnectMixin):
             in_reply_to=meta.get("message_id"),
             references=meta.get("references"),
         )
-        sent = await self._request(
-            "POST", "messages/send", json_body={"raw": raw, "threadId": thread_id}
-        )
+        try:
+            sent = await self._request(
+                "POST", "messages/send", json_body={"raw": raw, "threadId": thread_id}
+            )
+        except _NotFoundError as exc:
+            raise PermanentConnectorError(
+                f"Gmail can't find this conversation in {me or 'the connected account'} ({exc}). "
+                "It was deleted, or Gmail is connected to a different account than the one "
+                "that received it."
+            ) from exc
         return SendResult(
             external_id=str(sent["id"]),
             thread_id=str(sent.get("threadId") or thread_id),

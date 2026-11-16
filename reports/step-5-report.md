@@ -1,6 +1,6 @@
 # Step 5 report — Slack and Gmail live (local first)
 
-**Status:** partial. Everything is built and all checks pass. Slack was verified live end to end. Gmail receive and triage were verified live, but **no Gmail reply has yet been sent through Hubline** (see Known issues and How to verify).
+**Status:** complete. Everything is built and all checks pass. Slack and Gmail were both verified live end to end: receive, triage, draft, approve and send into the same conversation.
 **Date:** 2026-11-16
 
 **Constraints held:**
@@ -24,6 +24,8 @@ The tokens are stored Fernet-encrypted. They are never returned by the API and n
 - Polled every 60 s with `history.list`.
 - A test email arrived within 63 s, got priority 4 and a draft.
 - Bulk mail was set to priority 1 without an LLM call.
+- An approved reply to a real email (from your personal address to the demo inbox) went out through Hubline on 2026-11-16 at 20:16 IST and arrived **in the same Gmail conversation**.
+- Live testing also found and fixed a wrong-account send (404), and no-reply senders are now blocked (below).
 
 The 5-minute Slack safety-net poll stays under Slack's non-Marketplace limit of about 1 `conversations.history` call per minute, however many DMs are open (explained below).
 
@@ -38,13 +40,55 @@ Taken from the local database and backend logs; message text is left out.
 | Slack approve and send | ✅ `reply_sent` 2026-11-10 16:30 IST, `outbound_replies.status=sent`, Slack `ts` stored as `external_id`. You confirmed it landed in the DM. |
 | Slack echo of our own reply | ✅ Arrived 0.4 s later as a webhook with `inserted=0`, so it wasn't duplicated or triaged |
 | Your own messages in the DM | ✅ Stored as `outbound`, `agent_status=skipped` (thread context only) |
-| Gmail connect (OAuth, both scopes) | ✅ 2026-11-10. **Reconnected on 2026-11-16**, so the 7-day Testing limit now ends around 2026-11-23. |
+| Gmail connect (OAuth, both scopes) | ✅ 2026-11-10 as the demo account. ⚠️ The 2026-11-16 reconnect signed in to your personal account by mistake. You then revoked Hubline's access there, and I disconnected Gmail and deleted everything from that mailbox (below). **Gmail must be reconnected as the demo account.** |
 | Gmail receive | ✅ 11 inbox mails stored, Promotions/Social excluded. The live test email was stored **63 s** after it arrived. The others came from the backfill, or arrived while the backend was off and were picked up by the next poll. |
 | Gmail triage | ✅ All 11 `done`. The test email → **P4**, needs reply, draft v1 (2,660 tokens). Six bulk mails → P1 by the prefilter with **0 tokens**. |
 | Gmail token refresh | ✅ The access token was refreshed automatically after 6 days offline (2026-11-16 00:52 UTC) |
-| Gmail approve and send | ❌ **Not yet exercised.** `outbound_replies` has no Gmail row, the backend logs have no Gmail `approve` call, and the test email is still `open`. |
+| Gmail approve and send | ✅ **2026-11-16 20:16:14 IST:** `reply_sent`, approve returned 200, `outbound_replies.status=sent` with Gmail's message id stored. The email (from your personal address, P3, draft v1) moved to **replied**, and one outbound row was added to its thread. You confirmed the reply arrived in the same Gmail conversation. The first attempt that morning had failed with a 404; root cause and fix below. |
 | Forged or unsigned Slack webhook through the tunnel | ✅ 401 `webhook_rejected` |
 | `/api/*` without the token, through the tunnel | ✅ 401 |
+
+## Fix: Gmail send 404 and no-reply senders (2026-11-16)
+**What happened:** approving a Gmail message failed with `_NotFoundError: messages/send`.
+
+**The URL was correct.** The connector builds `POST https://gmail.googleapis.com/gmail/v1/users/me/messages/send` with `{raw, threadId}`. A new respx test now pins the exact URL, method, auth header, JSON keys and the decoded RFC 2822 message.
+
+**Root cause:** outgoing requests weren't logged and Google's error body was discarded, so I ran read-only checks against the live Gmail API (no send):
+- `profile` returned 200 with scopes `gmail.readonly gmail.send`.
+- `threads/{id}` and `messages/{id}` both returned `404 NOT_FOUND "Requested entity was not found."`.
+- Gmail had been reconnected that morning **as a different Google account**. 9 of the 11 stored Gmail ids belong to the demo mailbox and don't exist in the connected one.
+- Sending with a `threadId` from another mailbox is a 404.
+
+**Fixes:**
+- **Account guard:**
+  - Each Gmail message now records which mailbox received it (`reply_meta.mailbox`).
+  - `send()` refuses before any network call when Gmail is connected as someone else: "this email was received by X, but Gmail is now connected as Y; reconnect Gmail as X".
+- **Clear 404:** "Gmail can't find this conversation in <account> (… Requested entity was not found.). It was deleted, or Gmail is connected to a different account…". The internal `_NotFoundError` name is no longer shown.
+- **Logs:** every Gmail API error logs `gmail_api_error` with the method, the full URL, the status and Google's own reason. The token is never logged.
+- **No-reply and app-notification senders** (`notification@`, `notifications@`, `no-reply@`, `noreply@`, `do-not-reply@`, `mailer-daemon@`, `bounces@`; matched on the part before `@` only, in `app/addresses.py`):
+  - **Prefilter:** priority 1, category `automated`, **no draft, no LLM call**, whether or not the mail has bulk headers.
+  - **Never sent to:** a new connector hook `reply_blocked_reason()` (default: none) is checked by:
+    - the message detail (`can_send=false` plus `send_blocked_reason`; the dashboard shows "Sending is off for this message: …")
+    - approve (**409 `reply_blocked`**, with no reply row and no send)
+    - Gmail's `send()` itself, as a backstop
+  - Gmail blocks a reply when **either** the From sender or the Reply-To address is no-reply.
+  - The Slack notification email (From `notification@slack.com`) is blocked because of its sender, even though its Reply-To is Slack's reply-by-email address.
+
+**Existing rows:** the 9 messages from the previous Gmail triage keep their old priority. The new rule applies to new mail and to a manual **Triage**. The failed Slack-notification email now shows "Sending is off". I didn't re-triage it or send from it.
+
+## Cleanup and Reconnect safeguards (2026-11-16, evening)
+- **Personal-mailbox data deleted** (your answer 1):
+  - **3 messages** from your personal Gmail: the 2 pulled in right after the mistaken reconnect, plus 1 later mail tagged `mailbox=<personal>`.
+  - Their **3 agent jobs** (cascade) and **3 threads** left empty.
+  - There were no drafts or replies.
+  - **Gmail disconnected**, which deleted the personal account's encrypted token and cleared the identity and `self_ids`. You had already revoked access at Google.
+  - 9 Gmail messages remain, all from the demo mailbox. 0 rows reference the personal address.
+- **Reconnect preselects the connected account** (your answer 2):
+  - `OAuthConnectMixin.authorize_url()` takes an optional `login_hint`.
+  - The core passes the connected identity when the connector is `connected` or `needs_reauth`. Gmail adds `login_hint=<address>` to Google's URL, so a 7-day re-login opens on the same account.
+  - First connect, or a connect after Disconnect, sends no hint, so you choose.
+- **The Gmail card shows the address:** "Connected as **x@gmail.com**", or "Last connected as …" when the login expired, next to the status. Under the button: "x@gmail.com is preselected on the sign-in screen" (Reconnect) or "Pick the account Hubline should read on the sign-in screen" (Connect).
+- **Disconnect clears the old account's traces:** `self_ids`, `last_error` on the account and on `sync_state`. Before this, the disconnected card still showed "Google access expired…" from the personal account.
 
 ## Slack history rate limit: how the poll stays at ≤ 1 call per minute
 Slack limits `conversations.history` for non-Marketplace apps to about 1 request per minute, 15 messages per call. Real-time delivery is the Events API, which isn't covered by that limit. The history call is only the safety net. In `app/connectors/slack.py`:
@@ -132,13 +176,13 @@ Run on 2026-11-16, after the last code change.
 
 | Command | Result |
 |---|---|
-| `cd backend && uv run pytest` | **339 passed, 6 skipped** (86.9 s, real Postgres, no external APIs) |
+| `cd backend && uv run pytest` | **372 passed, 6 skipped** (84.9 s, real Postgres, no external APIs). Includes the Gmail send fix (exact send URL, 404 message and log, account guard, no-reply block, prefilter rule, address rule, approve 409), `login_hint` and the Disconnect cleanup. |
 | `uv run ruff check .` / `uv run ruff format --check .` | clean / clean |
-| `uv run mypy` (strict, `app/`) | Success: no issues found in 58 source files |
+| `uv run mypy` (strict, `app/`) | Success: no issues found in 59 source files |
 | `cd frontend && npm run lint` / `npm run typecheck` | clean / clean |
-| `npm test` (Vitest) | **34 passed** (4 files) |
+| `npm test` (Vitest) | **36 passed** (4 files) |
 | `npm run build` | success |
-| `npm run e2e` (Playwright) | 2 passed (run 2026-11-10; the frontend hasn't changed since) |
+| `npm run e2e` (Playwright: `next build` + smoke) | **2 passed** (29.4 s, 2026-11-16, after the last frontend change). Its run overwrote the Step 3 screenshots, which I restored with `git checkout`. |
 
 The 6 skips are contract cases that don't apply: the webhook-only path is covered by the Slack signature tests, and connectors without the `sample` capability skip the sample case.
 
@@ -151,19 +195,22 @@ The 6 skips are contract cases that don't apply: the webhook-only path is covere
 - **Test fixtures are built by hand from the documented API shapes**, not recorded from the live APIs as plan §10 suggests. Recording would have needed live traffic before the code existed.
 - **No `_util/oauth.py` or `_util/http.py`:** PKCE lives in `services/connect.py`, and each connector uses the shared `httpx` client with its own error mapping.
 - **Verified locally, not "in production":** Step 4 isn't deployed (R11/R13).
+- **No-reply rule widened (your instruction, 2026-11-16):**
+  - The plan's prefilter needed bulk headers **and** a no-reply sender. Now a no-reply or notification sender alone is automated (P1, no draft, no LLM call).
+  - Replies to no-reply senders or no-reply Reply-To addresses are blocked. This uses the new optional connector hook `reply_blocked_reason()`.
 
 ## Known issues
-- **The Gmail approve-and-send path hasn't been exercised live yet.** It is covered by respx tests (MIME headers, `threadId`, Reply-To, 401 → refresh, at-most-once), but no real Gmail reply has gone out through Hubline. The test email (P4, draft ready) is still open in the feed. See How to verify, step 3.
 - **Fixed during the live test: the OAuth code appeared in uvicorn's access log.** The line was `GET /oauth/gmail/callback?code=…&state=…`. The code was single-use and already spent, so it couldn't be reused, but it broke the "no secrets in logs" rule. uvicorn's access log now shows `code=[REDACTED]&state=[REDACTED]`. That was checked against the live backend and is covered by 2 new tests. Old local log files from 2026-11-10 to 2026-11-16, outside the repo in the Claude temp folder, still contain those spent codes.
 - **The tunnel URL changes every run**, and the tunnel dies when the PC sleeps. While it's down, Slack retries 3 times and then drops the event; the safety-net poll picks the DM up within 5·N minutes.
-- **Gmail's Testing-mode refresh token lasts 7 days.** The current login ends around 2026-11-23.
+- **Gmail's Testing-mode refresh token lasts 7 days.** The demo account was connected on 2026-11-16 at 20:08 IST, so the login ends around **2026-11-23, 20:08 IST**. Reconnect preselects the same account.
+- **Two mistaken connections to your personal Gmail happened during testing.** Everything they brought in was deleted (6 messages in total, their jobs and threads), and the guards above stop it happening silently again.
 - **Threads that started before connecting have partial context** in Hubline.
 - **Slack `users.info` names** are cached in memory per process, so a renamed user shows the old name until a restart.
 
 ## Manual steps for you
-1. **Send one Gmail reply through Hubline** (How to verify, step 3), and tell me the result. I'll then update this report's status to complete.
-2. Each Slack session: run the tunnel helper, then paste the new URL into **api.slack.com/apps → Hubline Dev → Event Subscriptions → Request URL**. Wait for **Verified ✓**, then **Save Changes**.
-3. Before 2026-11-23: **Connectors → Gmail → Reconnect Gmail** (tick both boxes, then switch it on).
+1. Each Slack session: run the tunnel helper, then paste the new URL into **api.slack.com/apps → Hubline Dev → Event Subscriptions → Request URL**. Wait for **Verified ✓**, then **Save Changes**.
+2. Before 2026-11-23, 20:08 IST: **Connectors → Gmail → Reconnect Gmail**. `dhruv.sonkusare.dev@gmail.com` is preselected; tick both boxes, then switch it on.
+3. Optional: fix the stray `"` in the system PATH entry `C:\Program Files\Amazon\AWSCLIV2"`, then restart VS Code. Until then, `npm run dev` needs `$env:PATH = $env:PATH.Replace('AWSCLIV2"', 'AWSCLIV2')` first.
 
 ## How to verify
 ```powershell
@@ -185,6 +232,5 @@ cd frontend; npm run dev                                                # third 
 5. **Checks:** `cd backend; uv run pytest; uv run ruff check .; uv run mypy` and `cd frontend; npm run lint; npm run typecheck; npm test; npm run build`.
 
 ## Open questions
-1. **Gmail live reply:** can you do How to verify step 3 now? I'll update the status to complete afterwards (a one-line commit).
-2. **Next step:** Step 4 (deploy) still waits for GitHub. Is Step 6 (Teams, LinkedIn/X on demo data, hardening, demo script) next, or do you want something else first?
-3. **Step 7 demo login:** with no password at all (anyone with the URL), or a password published in the README? This matters for rate-limiting viewers and keeping Neon's compute under the limit.
+1. **Next step:** Step 4 (deploy) still waits for GitHub. Is Step 6 (Teams, LinkedIn/X on demo data, hardening, demo script) next, or do you want something else first?
+2. **Step 7 demo login:** with no password at all (anyone with the URL), or a password published in the README? This matters for rate-limiting viewers and keeping Neon's compute under the limit.

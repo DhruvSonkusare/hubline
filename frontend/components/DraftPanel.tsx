@@ -20,6 +20,8 @@ type Props = {
   messageId: string;
   status: string;
   canSend: boolean;
+  /** Set when the app can send but this message must not be answered (e.g. no-reply sender). */
+  sendBlockedReason?: string | null;
   source: string;
   sourceDisplay: string;
   threadTitle: string;
@@ -131,7 +133,12 @@ export function DraftPanel(props: Props) {
           Check {props.sourceDisplay} before doing anything else.
         </div>
       )}
-      {!canSend && (
+      {!canSend && props.sendBlockedReason && (
+        <p className="mb-4 rounded-lg bg-slate-100 px-3 py-2 text-sm text-slate-700">
+          Sending is off for this message: {props.sendBlockedReason}.
+        </p>
+      )}
+      {!canSend && !props.sendBlockedReason && (
         <p className="mb-4 rounded-lg bg-slate-100 px-3 py-2 text-sm text-slate-700">
           {props.sourceDisplay} is read-only in Hubline: copy the draft and paste it in{" "}
           {props.sourceDisplay}.

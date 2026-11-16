@@ -110,6 +110,15 @@ class Connector(ABC):
     async def send(self, thread_id: str, text: str, *, reply_to: ReplyContext) -> SendResult:
         raise ReadOnlyConnectorError(f"{self.describe().key} is read-only")
 
+    @classmethod
+    def reply_blocked_reason(cls, *, sender_id: str, reply_meta: Mapping[str, Any]) -> str | None:
+        """Why this one message must never be answered (e.g. a no-reply sender), or None.
+
+        Checked without network access: by the feed (the UI hides Send) and by approve (409),
+        before anything is sent. Default: every message of a sending connector is answerable.
+        """
+        return None
+
     async def parse_webhook(self, request: WebhookRequest) -> WebhookResult:
         """Verify the request signature FIRST (raise WebhookVerificationError), then parse."""
         raise NotImplementedError(f"{self.describe().key} does not accept webhooks")
@@ -183,8 +192,16 @@ class OAuthConnectMixin(ABC):
     @classmethod
     @abstractmethod
     def authorize_url(
-        cls, *, state: str, code_challenge: str, redirect_uri: str, app_settings: Settings
-    ) -> str: ...
+        cls,
+        *,
+        state: str,
+        code_challenge: str,
+        redirect_uri: str,
+        app_settings: Settings,
+        login_hint: str | None = None,
+    ) -> str:
+        """`login_hint` is the currently connected account (on Reconnect), so the provider can
+        preselect it; providers without such a parameter ignore it."""
 
     @classmethod
     @abstractmethod

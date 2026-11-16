@@ -169,8 +169,15 @@ async def get_message_detail(session: AsyncSession, message_id: uuid.UUID) -> Me
             )
         ).scalars()
     )
+    send_blocked_reason: str | None = None
     try:
-        can_send = registry.get(m.source).describe().can_send
+        cls = registry.get(m.source)
+        can_send = cls.describe().can_send
+        if can_send:
+            send_blocked_reason = cls.reply_blocked_reason(
+                sender_id=m.sender_id, reply_meta=dict(m.reply_meta or {})
+            )
+            can_send = send_blocked_reason is None
     except registry.UnknownConnectorError:
         can_send = False
     current = drafts[0] if drafts else None
@@ -200,6 +207,7 @@ async def get_message_detail(session: AsyncSession, message_id: uuid.UUID) -> Me
         prompt_version=m.prompt_version,
         triaged_at=m.triaged_at,
         can_send=can_send,
+        send_blocked_reason=send_blocked_reason,
         draft=DraftOut.model_validate(current, from_attributes=True) if current else None,
         draft_versions=len(drafts),
         thread=[

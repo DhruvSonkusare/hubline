@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.addresses import is_no_reply_address
 from app.agent.llm import MAX_TOKENS, StructuredLLM, call_structured
 from app.agent.prompts import draft_prompt, triage_prompt
 from app.agent.schemas import DraftResult, TriageResult, normalize_draft, normalize_triage
@@ -14,10 +15,6 @@ TRIAGE_MAX_TOKENS = MAX_TOKENS["triage"]  # reasoning tokens count against max_t
 DRAFT_MAX_TOKENS = MAX_TOKENS["draft"]
 MAX_DRAFT_ATTEMPTS = 2  # first draft + one retry after validation feedback
 
-_NOREPLY_SENDER = re.compile(
-    r"(^|[^a-z])(no-?reply|do-?not-?reply|mailer-daemon|bounces?|notifications?)([^a-z]|$)",
-    re.I,
-)
 _PLACEHOLDER = re.compile(
     r"\[(?:your|insert|name|date|time|day|company|link|todo|tbd|x+)\b[^\]]*\]"
     r"|\{\{[^}]*\}\}"
@@ -39,14 +36,18 @@ def prefilter(state: AgentState) -> dict[str, Any]:
         return {}
     if not m.body.strip() and not (m.subject or "").strip():
         return {"outcome": "skipped", "skip_reason": "empty message"}
-    if is_bulk_automated(m.sender_id, m.headers):
+    if is_no_reply_address(m.sender_id):
+        bulk = is_bulk_automated(m.sender_id, m.headers)
         return {
             "triage": TriageResult(
                 priority=1,
                 summary=f"{m.sender_name or m.sender_id}: {(m.subject or m.body)[:120]}".strip(),
                 needs_reply=False,
                 category="automated",
-                reason="Bulk mail from a no-reply sender (rule-based, no LLM call).",
+                reason=(
+                    f"{'Bulk mail' if bulk else 'Automated notification'} from a no-reply sender "
+                    "(rule-based, no LLM call). Replies to it are blocked."
+                ),
             ),
             "triage_by": "rules",
         }
@@ -54,12 +55,13 @@ def prefilter(state: AgentState) -> dict[str, Any]:
 
 
 def is_bulk_automated(sender_id: str, headers: dict[str, str]) -> bool:
+    """Mailing-list headers from a no-reply sender (kept for the reason text and its tests)."""
     bulk = "list-unsubscribe" in headers or headers.get("precedence", "").lower() in {
         "bulk",
         "list",
         "junk",
     }
-    return bulk and bool(_NOREPLY_SENDER.search(sender_id))
+    return bulk and is_no_reply_address(sender_id)
 
 
 def route_after_prefilter(state: AgentState) -> str:

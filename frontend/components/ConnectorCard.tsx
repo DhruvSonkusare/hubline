@@ -80,6 +80,12 @@ export function ConnectorCard({ connector: c }: { connector: Connector }) {
             {status.label}
             {!c.can_send && <span className="text-slate-400">· read-only</span>}
           </p>
+          {c.account_identity && (c.status === "connected" || c.status === "needs_reauth") && (
+            <p className="mt-1 truncate text-sm text-slate-700" title={c.account_identity}>
+              {c.status === "connected" ? "Connected as " : "Last connected as "}
+              <span className="font-medium text-slate-900">{c.account_identity}</span>
+            </p>
+          )}
         </div>
         {c.status === "connected" && (
           <label className="flex cursor-pointer items-center gap-2 text-sm">
@@ -103,14 +109,6 @@ export function ConnectorCard({ connector: c }: { connector: Connector }) {
       </header>
 
       <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
-        {c.account_identity && (
-          <>
-            <dt className="text-slate-500">Account</dt>
-            <dd className="truncate" title={c.account_identity}>
-              {c.account_identity}
-            </dd>
-          </>
-        )}
         <dt className="text-slate-500">Last sync</dt>
         <dd>{c.last_success_at ? clockTime(c.last_success_at) : "never"}</dd>
         {c.enabled && c.next_poll_at && (
@@ -148,6 +146,11 @@ export function ConnectorCard({ connector: c }: { connector: Connector }) {
           <button type="button" className="btn-primary" disabled={pending} onClick={connectOAuth}>
             {c.status === "needs_reauth" ? "Reconnect" : "Connect"} {c.display_name}
           </button>
+          <p className="mt-1.5 text-xs text-slate-500">
+            {c.status === "needs_reauth" && c.account_identity
+              ? `${c.account_identity} is preselected on the sign-in screen.`
+              : "Pick the account Hubline should read on the sign-in screen."}
+          </p>
         </div>
       )}
 

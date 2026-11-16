@@ -132,6 +132,7 @@ export default async function MessagePage({ params }: { params: Promise<{ id: st
             messageId={m.id}
             status={m.status}
             canSend={m.can_send}
+            sendBlockedReason={m.send_blocked_reason}
             source={source}
             sourceDisplay={m.source_display}
             threadTitle={m.subject ?? m.summary ?? ""}

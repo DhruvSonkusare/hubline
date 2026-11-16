@@ -589,6 +589,8 @@ export interface components {
             received_at: string;
             /** Replies */
             replies: components["schemas"]["ReplyOut"][];
+            /** Send Blocked Reason */
+            send_blocked_reason?: string | null;
             sender: components["schemas"]["SenderOut"];
             /** Source */
             source: string;

@@ -85,6 +85,8 @@ class MessageDetail(MessageSummary):
     prompt_version: str | None
     triaged_at: datetime | None
     can_send: bool
+    # Set when the app can send but this message must not be answered (e.g. a no-reply sender).
+    send_blocked_reason: str | None = None
     draft: DraftOut | None
     draft_versions: int
     thread: list[ThreadItemOut]  # the whole thread incl. this message and your replies

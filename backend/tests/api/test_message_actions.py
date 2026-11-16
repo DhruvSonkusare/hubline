@@ -190,6 +190,55 @@ async def test_read_only_source_cannot_be_approved(
     assert r.json()["error"]["code"] == "connector_read_only"
 
 
+class BlockingSender(FailingSender):
+    """Can send, but refuses no-reply senders (the reply_blocked_reason hook)."""
+
+    descriptor = ConnectorDescriptor(
+        key="blocksend",
+        display_name="Block Send",
+        auth_type=AuthType.NONE,
+        capabilities=frozenset({Capability.POLL, Capability.SEND}),
+        poll_interval_s=60,
+    )
+
+    @classmethod
+    def reply_blocked_reason(cls, *, sender_id: str, reply_meta: Any) -> str | None:
+        return "no-reply sender" if sender_id.startswith("noreply") else None
+
+
+@pytest.fixture
+def blocksend(monkeypatch: pytest.MonkeyPatch) -> type[BlockingSender]:
+    monkeypatch.setitem(registry._REGISTRY, "blocksend", BlockingSender)
+    BlockingSender.sends = 0
+    return BlockingSender
+
+
+async def test_blocked_reply_is_hidden_in_detail_and_refused_without_sending(
+    blocksend: type[BlockingSender], app_client: httpx.AsyncClient, sessionmaker: SM
+) -> None:
+    from app.services.ingest import ingest_messages
+    from tests.conftest import msg
+    from tests.helpers import get_account
+
+    acct = await get_account(sessionmaker, "blocksend")
+    async with sessionmaker() as s, s.begin():
+        await ingest_messages(s, acct, [msg(1, source="blocksend", sender="noreply@x.example")])
+    async with sessionmaker() as s:
+        mid = (await s.execute(select(Message.id))).scalar_one()
+
+    d = (await app_client.get(f"/api/messages/{mid}")).json()
+    assert d["can_send"] is False
+    assert d["send_blocked_reason"] == "no-reply sender"
+    r = await app_client.post(
+        f"/api/messages/{mid}/approve", json={"body": "x", "idempotency_key": str(uuid.uuid4())}
+    )
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "reply_blocked"
+    assert blocksend.sends == 0
+    async with sessionmaker() as s:
+        assert (await s.execute(select(OutboundReply))).first() is None  # no reply row at all
+
+
 async def test_failed_send_returns_502_keeps_message_open_and_edited_draft(
     failsend: type[FailingSender], app_client: httpx.AsyncClient, sessionmaker: SM
 ) -> None:

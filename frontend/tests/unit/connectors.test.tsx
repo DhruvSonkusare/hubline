@@ -136,6 +136,7 @@ describe("ConnectorCard: token connectors (Slack)", () => {
       }),
     );
     expect(screen.getByText("Hubline Demo / dhruv")).toBeInTheDocument();
+    expect(screen.getByText(/Connected as/)).toBeInTheDocument();
     expect(screen.queryByLabelText("User OAuth Token")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
     expect(actions.disconnectConnector).not.toHaveBeenCalled();
@@ -176,9 +177,28 @@ describe("ConnectorCard: OAuth connectors (Gmail)", () => {
     expect(
       screen.getByRole("button", { name: "Reconnect Gmail" }),
     ).toBeInTheDocument();
+    expect(screen.getByText(/Last connected as/)).toBeInTheDocument();
+    expect(
+      screen.getByText("demo@gmail.com is preselected on the sign-in screen."),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Disconnect" }),
     ).toBeInTheDocument();
+  });
+
+  it("connected: shows the connected Gmail address next to the status", () => {
+    renderCard(
+      gmail({
+        status: "connected",
+        enabled: true,
+        account_identity: "demo@gmail.com",
+      }),
+    );
+    expect(screen.getByText("demo@gmail.com")).toBeInTheDocument();
+    expect(screen.getByText(/Connected as/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Connect Gmail|Reconnect Gmail/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("not configured: no connect button, lists the missing settings", () => {

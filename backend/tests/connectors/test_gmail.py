@@ -14,9 +14,16 @@ import httpx
 import pytest
 import respx
 import structlog
+import structlog.testing
 from httpx import Response
 
-from app.connectors.base import AuthExpiredError, ConnectError, ConnectorContext, RateLimitedError
+from app.connectors.base import (
+    AuthExpiredError,
+    ConnectError,
+    ConnectorContext,
+    PermanentConnectorError,
+    RateLimitedError,
+)
 from app.connectors.gmail import SCOPES, TOKEN_URL, GmailConnector
 from app.connectors.models import ReplyContext, Sender
 from tests.conftest import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, make_connector_settings
@@ -91,6 +98,22 @@ def test_authorize_url_uses_the_exact_redirect_uri_and_pkce() -> None:
         "code_challenge": "ch4llenge",
         "code_challenge_method": "S256",
     }
+
+
+def test_authorize_url_passes_login_hint_only_for_an_email() -> None:
+    def query(hint: str | None) -> dict[str, list[str]]:
+        url = GmailConnector.authorize_url(
+            state="s",
+            code_challenge="c",
+            redirect_uri=REDIRECT,
+            app_settings=make_connector_settings(),
+            login_hint=hint,
+        )
+        return parse_qs(urlsplit(url).query)
+
+    assert query("demo@gmail.com")["login_hint"] == ["demo@gmail.com"]
+    assert "login_hint" not in query(None)
+    assert "login_hint" not in query("not-an-email")
 
 
 async def test_exchange_code_sends_verifier_and_reads_profile() -> None:
@@ -229,6 +252,7 @@ async def test_first_fetch_backfills_inbox_and_returns_history_cursor() -> None:
     assert m.body.startswith("Hi Dhruv,")
     assert m.reply_meta["message_id"] == "<a1@mail.acme.example>"
     assert m.reply_meta["reply_to"] == "priya@acme.example"
+    assert m.reply_meta["mailbox"] == p.GMAIL_ME  # which account received it
     assert m.received_at == p.FIXED_NOW - timedelta(hours=2)
 
 
@@ -300,17 +324,111 @@ async def test_expired_history_id_falls_back_to_the_last_day() -> None:
 # ----------------------------------------------------------------------------- send
 
 
-def reply_ctx(reply_to: str = "priya@acme.example") -> ReplyContext:
+def reply_ctx(
+    reply_to: str = "priya@acme.example",
+    *,
+    sender: str = "priya@acme.example",
+    mailbox: str | None = p.GMAIL_ME,
+) -> ReplyContext:
+    meta: dict[str, Any] = {
+        "message_id": "<a1@mail.acme.example>",
+        "references": "<root@mail.acme.example>",
+        "reply_to": reply_to,
+        "subject": "Contract review",
+    }
+    if mailbox is not None:
+        meta["mailbox"] = mailbox
     return ReplyContext(
         in_reply_to_external_id="a1",
         subject="Contract review",
-        recipient=Sender(id="priya@acme.example"),
-        reply_meta={
-            "message_id": "<a1@mail.acme.example>",
-            "references": "<root@mail.acme.example>",
-            "reply_to": reply_to,
-            "subject": "Contract review",
-        },
+        recipient=Sender(id=sender),
+        reply_meta=meta,
+    )
+
+
+GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+
+
+async def test_send_posts_raw_rfc2822_and_thread_id_to_the_exact_send_url() -> None:
+    """The one Gmail send call: POST .../gmail/v1/users/me/messages/send {raw, threadId}."""
+    with respx.mock(assert_all_called=True) as router:
+        route = router.post(GMAIL_SEND_URL).mock(
+            return_value=Response(200, json={"id": "sent1", "threadId": "18c0000000000001"})
+        )
+        async with httpx.AsyncClient() as http:
+            await make_gmail(http).send("18c0000000000001", "On it.", reply_to=reply_ctx())
+    assert route.call_count == 1
+    req = route.calls.last.request
+    assert req.method == "POST"
+    assert str(req.url) == GMAIL_SEND_URL  # no query string, no extra path segments
+    assert req.headers["authorization"] == "Bearer " + p.gmail_credentials()["access_token"]
+    assert req.headers["content-type"] == "application/json"
+    body = json.loads(req.content)
+    assert set(body) == {"raw", "threadId"}
+    assert body["threadId"] == "18c0000000000001"
+    raw = base64.urlsafe_b64decode(body["raw"])
+    msg = email.message_from_bytes(raw)
+    assert msg["To"] == "priya@acme.example"
+    assert msg["In-Reply-To"] == "<a1@mail.acme.example>"
+    assert msg.get_payload(decode=True).decode().strip() == "On it."
+
+
+async def test_send_404_explains_a_missing_conversation_and_logs_googles_reason() -> None:
+    not_found = {
+        "error": {"code": 404, "message": "Requested entity was not found.", "status": "NOT_FOUND"}
+    }
+    with respx.mock(assert_all_called=False) as router:
+        router.post(GMAIL_SEND_URL).mock(return_value=Response(404, json=not_found))
+        async with httpx.AsyncClient() as http:
+            with (
+                structlog.testing.capture_logs() as logs,
+                pytest.raises(PermanentConnectorError, match="can't find this conversation") as err,
+            ):
+                await make_gmail(http).send("18c-gone", "x", reply_to=reply_ctx())
+    assert "Requested entity was not found" in str(err.value)
+    assert "_NotFoundError" not in str(err.value)
+    [entry] = [e for e in logs if e["event"] == "gmail_api_error"]
+    assert entry["method"] == "POST"
+    assert entry["url"] == GMAIL_SEND_URL
+    assert entry["status"] == 404
+    assert entry["reason"] == "NOT_FOUND Requested entity was not found."
+
+
+async def test_send_refuses_when_gmail_is_now_connected_to_another_account() -> None:
+    with respx.mock(assert_all_called=False) as router:
+        route = router.post(GMAIL_SEND_URL).mock(return_value=Response(200, json={"id": "x"}))
+        async with httpx.AsyncClient() as http:
+            with pytest.raises(PermanentConnectorError, match=r"received by demo@other.example"):
+                await make_gmail(http).send(
+                    "t", "x", reply_to=reply_ctx(mailbox="demo@other.example")
+                )
+    assert route.call_count == 0  # nothing is sent
+
+
+@pytest.mark.parametrize(
+    ("sender", "reply_to"),
+    [
+        ("notification@slack.com", "eb-T0-U0-abc@slack-mail.com"),  # app notification
+        ("noreply@github.com", "noreply@github.com"),
+        ("priya@acme.example", "no-reply@acme.example"),  # human From, no-reply Reply-To
+    ],
+)
+async def test_send_never_goes_to_or_answers_a_no_reply_address(sender: str, reply_to: str) -> None:
+    assert GmailConnector.reply_blocked_reason(sender_id=sender, reply_meta={"reply_to": reply_to})
+    with respx.mock(assert_all_called=False) as router:
+        route = router.post(GMAIL_SEND_URL).mock(return_value=Response(200, json={"id": "x"}))
+        async with httpx.AsyncClient() as http:
+            with pytest.raises(PermanentConnectorError, match="no-reply"):
+                await make_gmail(http).send("t", "x", reply_to=reply_ctx(reply_to, sender=sender))
+    assert route.call_count == 0
+
+
+def test_normal_mail_is_answerable() -> None:
+    assert (
+        GmailConnector.reply_blocked_reason(
+            sender_id="priya@acme.example", reply_meta={"reply_to": "team@acme.example"}
+        )
+        is None
     )
 
 
