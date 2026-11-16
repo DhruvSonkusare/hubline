@@ -11,6 +11,7 @@ from typing import Any
 
 import httpx
 import pytest
+import respx
 import structlog
 
 from app.connectors import registry
@@ -21,11 +22,20 @@ from app.connectors.base import (
 )
 from app.connectors.models import FetchResult, ReplyContext, Sender, WebhookRequest
 from tests.conftest import make_settings
+from tests.connectors import payloads
 
 FIXED_NOW = datetime(2026, 11, 9, 12, 0, tzinfo=UTC)
 
-# key -> callable returning extra ConnectorContext kwargs (credentials, mocked http, ...)
-CONTEXT_FACTORIES: dict[str, Callable[[], dict[str, Any]]] = {}
+# key -> callable returning extra ConnectorContext kwargs (credentials, ...)
+CONTEXT_FACTORIES: dict[str, Callable[[], dict[str, Any]]] = {
+    "slack": lambda: {"credentials": payloads.slack_credentials()},
+    "gmail": lambda: {"credentials": payloads.gmail_credentials(now=FIXED_NOW)},
+}
+# key -> function registering respx routes for the connector's HTTP calls
+HTTP_MOCKS: dict[str, Callable[[respx.Router], None]] = {
+    "slack": payloads.mock_slack_basics,
+    "gmail": payloads.mock_gmail_basics,
+}
 
 KEYS = sorted(registry.all_connectors())
 
@@ -71,9 +81,11 @@ async def test_first_fetch_returns_valid_messages(key: str) -> None:
     cls = registry.get(key)
     if not cls.describe().can_poll:
         pytest.skip("not a polling connector")
-    async with httpx.AsyncClient() as http:
-        connector = cls(make_ctx(cls, http))
-        result = await connector.fetch_new(None)
+    with respx.mock(assert_all_called=False) as router:
+        HTTP_MOCKS.get(key, lambda _: None)(router)
+        async with httpx.AsyncClient() as http:
+            connector = cls(make_ctx(cls, http))
+            result = await connector.fetch_new(None)
     assert isinstance(result, FetchResult)
     assert result.cursor is not None, "first fetch must return a cursor to resume from"
     ids = [m.external_id for m in result.messages]

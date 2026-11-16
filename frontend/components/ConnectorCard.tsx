@@ -3,7 +3,14 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
-import { saveConnectorSettings, setConnectorEnabled, syncConnector } from "@/app/actions";
+import {
+  connectWithToken,
+  disconnectConnector,
+  saveConnectorSettings,
+  setConnectorEnabled,
+  startOAuth,
+  syncConnector,
+} from "@/app/actions";
 import { DemoBadge } from "@/components/Badges";
 import { useToast } from "@/components/Toast";
 import type { Connector } from "@/lib/backend";
@@ -27,6 +34,29 @@ export function ConnectorCard({ connector: c }: { connector: Connector }) {
   const [cap, setCap] = useState(String(settings.max_messages ?? 100));
   const status = STATUS[c.status] ?? { label: c.status, dot: "bg-slate-400" };
   const isDemo = c.key === "demo";
+  const connectable = c.connect_method !== "none";
+  const canConnect = connectable && (c.status === "disconnected" || c.status === "needs_reauth");
+  const canDisconnect =
+    connectable && (c.status === "connected" || c.status === "needs_reauth" || c.status === "error");
+  const [tokens, setTokens] = useState<Record<string, string>>({});
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+
+  const connectOAuth = () =>
+    start(async () => {
+      const r = await startOAuth(c.key);
+      if (r.ok) window.location.assign(r.data.authorize_url);
+      else toast(r.message, "error");
+    });
+
+  const submitTokens = () =>
+    start(async () => {
+      const r = await connectWithToken(c.key, tokens);
+      setTokens({}); // never keep the pasted secret around in the page
+      if (r.ok) {
+        toast(`${c.display_name} connected as ${r.data.account_identity ?? "you"}.`, "success");
+        router.refresh();
+      } else toast(r.message, "error");
+    });
 
   const run = (fn: () => Promise<{ ok: boolean; message?: string }>, success: string) =>
     start(async () => {
@@ -73,6 +103,14 @@ export function ConnectorCard({ connector: c }: { connector: Connector }) {
       </header>
 
       <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
+        {c.account_identity && (
+          <>
+            <dt className="text-slate-500">Account</dt>
+            <dd className="truncate" title={c.account_identity}>
+              {c.account_identity}
+            </dd>
+          </>
+        )}
         <dt className="text-slate-500">Last sync</dt>
         <dd>{c.last_success_at ? clockTime(c.last_success_at) : "never"}</dd>
         {c.enabled && c.next_poll_at && (
@@ -96,8 +134,65 @@ export function ConnectorCard({ connector: c }: { connector: Connector }) {
           Missing settings: {c.missing_env.join(", ")}
         </p>
       )}
+      {c.status === "needs_reauth" && (
+        <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          Access expired or was revoked. Reconnect to resume syncing and sending.
+        </p>
+      )}
       {c.last_error && (
         <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{c.last_error}</p>
+      )}
+
+      {canConnect && c.connect_method === "oauth" && (
+        <div className="mt-4">
+          <button type="button" className="btn-primary" disabled={pending} onClick={connectOAuth}>
+            {c.status === "needs_reauth" ? "Reconnect" : "Connect"} {c.display_name}
+          </button>
+        </div>
+      )}
+
+      {canConnect && c.connect_method === "token" && (
+        <form
+          className="mt-4 space-y-3 rounded-lg bg-slate-50 p-3"
+          aria-label={`Connect ${c.display_name}`}
+          onSubmit={(e) => {
+            e.preventDefault();
+            submitTokens();
+          }}
+        >
+          {c.token_fields.map((f) => {
+            const inputId = `${c.key}-${f.name}`;
+            return (
+              <div key={f.name} className="space-y-1 text-sm">
+                <label htmlFor={inputId} className="block text-slate-600">
+                  {f.label}
+                </label>
+                <input
+                  id={inputId}
+                  className="field w-full font-mono"
+                  type="password"
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder={f.placeholder}
+                  aria-describedby={f.help ? `${inputId}-help` : undefined}
+                  value={tokens[f.name] ?? ""}
+                  onChange={(e) => setTokens((t) => ({ ...t, [f.name]: e.target.value }))}
+                  required
+                />
+                {f.help && (
+                  <p id={`${inputId}-help`} className="text-xs text-slate-500">
+                    {f.help}
+                  </p>
+                )}
+              </div>
+            );
+          })}
+          <div className="flex justify-end">
+            <button type="submit" className="btn-primary" disabled={pending}>
+              {c.status === "needs_reauth" ? "Reconnect" : "Connect"}
+            </button>
+          </div>
+        </form>
       )}
 
       {editing && isDemo && (
@@ -135,22 +230,56 @@ export function ConnectorCard({ connector: c }: { connector: Connector }) {
         </form>
       )}
 
-      {c.status === "connected" && (
-        <div className="mt-auto flex gap-2 pt-4">
-          <button
-            type="button"
-            className="btn-secondary"
-            disabled={pending || !c.enabled}
-            title={c.enabled ? undefined : "Enable it first"}
-            onClick={() => run(() => syncConnector(c.key), "Sync started.")}
-          >
-            Sync now
-          </button>
+      {(c.status === "connected" || canDisconnect) && (
+        <div className="mt-auto flex flex-wrap gap-2 pt-4">
+          {c.status === "connected" && (
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={pending || !c.enabled}
+              title={c.enabled ? undefined : "Enable it first"}
+              onClick={() => run(() => syncConnector(c.key), "Sync started.")}
+            >
+              Sync now
+            </button>
+          )}
           {isDemo && !editing && (
             <button type="button" className="btn-ghost" onClick={() => setEditing(true)}>
               Settings…
             </button>
           )}
+          {canDisconnect &&
+            (confirmDisconnect ? (
+              <span className="ml-auto flex gap-2">
+                <button
+                  type="button"
+                  className="btn-danger"
+                  disabled={pending}
+                  onClick={() => {
+                    setConfirmDisconnect(false);
+                    run(() => disconnectConnector(c.key), `${c.display_name} disconnected.`);
+                  }}
+                >
+                  Yes, disconnect
+                </button>
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  onClick={() => setConfirmDisconnect(false)}
+                >
+                  Cancel
+                </button>
+              </span>
+            ) : (
+              <button
+                type="button"
+                className="btn-ghost ml-auto"
+                disabled={pending}
+                onClick={() => setConfirmDisconnect(true)}
+              >
+                Disconnect
+              </button>
+            ))}
         </div>
       )}
     </article>

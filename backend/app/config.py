@@ -114,6 +114,13 @@ class Settings(DatabaseSettings):
     agent_owner_context: str = "Python backend developer"
     agent_vip_senders: str = ""  # comma list of sender ids / emails
 
+    # --- Real connectors (Step 5). Tokens are stored encrypted with one Fernet key (plan R2).
+    credentials_encryption_key: SecretStr | None = None
+    oauth_state_ttl_s: int = Field(default=600, ge=60, le=3600)
+    google_client_id: str | None = None
+    google_client_secret: SecretStr | None = None
+    slack_signing_secret: SecretStr | None = None
+
     @cached_property
     def api_tokens(self) -> tuple[str, ...]:
         return tuple(t.strip() for t in self.backend_api_tokens.split(",") if t.strip())

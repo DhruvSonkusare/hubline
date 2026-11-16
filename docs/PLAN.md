@@ -1,6 +1,6 @@
 # Unified Alerts Hub (repo: `Hubline`) — Project Plan
 
-> **Status: APPROVED (2026-11-09) with revisions R1–R13 below.** This file is `docs/PLAN.md`, the source of truth.
+> **Status: APPROVED (2026-11-09) with revisions R1–R14 below.** This file is `docs/PLAN.md`, the source of truth.
 > **Hard requirement (R6): the whole project runs at $0.** No paid service, plan or API is used anywhere.
 > Any change to it is recorded in the step report that makes the change.
 
@@ -21,6 +21,7 @@
 | R11 | **GitHub on hold (temporary; the account is unavailable).** Commit locally only: no push, no remote, no repo URL until the user says so. These wait until GitHub is back: GitHub OAuth login, the GitHub Actions CI and tick workflows (present in the repo, but never run), and Render/Vercel deploys from the repo. |
 | R12 | **Dashboard login uses a password for now.** It is an Auth.js **Credentials** provider with a single password, `DASHBOARD_PASSWORD` in `frontend/.env.local`.<ul><li>The password is compared in constant time (SHA-256 of both values, then `crypto.timingSafeEqual`).</li><li>Sessions use the same stateless JWT and `httpOnly`, `Secure`, `SameSite=Lax` cookie.</li><li>`auth.ts` builds its provider list from env vars only: `AUTH_PROVIDERS=password` (default), `github` or `password,github`.</li><li>GitHub needs `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET` and `ALLOWED_GITHUB_LOGINS`. **Switching to GitHub OAuth later is an env-var change only**; no code changes.</li></ul> |
 | R13 | **Step order swapped while GitHub is on hold (2026-11-10).** Step 4's deploy files are prepared now (`render.yaml`, `backend/Dockerfile`, `backend/.dockerignore`, `frontend/vercel.json`, `docs/setup/deploy.md`), but nothing is deployed. **Step 5 (Slack + Gmail) is built and verified LOCALLY first**, before Step 4 deploys:<ul><li>Slack events reach the PC through a free cloudflared quick tunnel (no account). Its URL changes every run and is pasted into the Slack app each session.</li><li>Gmail uses 60s polling plus OAuth to the exact redirect `http://localhost:8000/oauth/gmail/callback`.</li></ul>Step 4 deploys once GitHub is back; production URLs for the connectors are listed in `docs/setup/deploy.md`. Plan: `reports/step-5-plan.md`. |
+| R14 | **Step 7 added: self-hosting and a public demo (decision "Option A", 2026-11-16).** Planned only, built after Step 6. Anyone can run their own Hubline on free tiers, and a public read-only demo login shows only `is_demo` data.<ul><li>**Hubline stays single-user per deployment.** No multi-tenant sign-up, no users table: each self-hoster runs their own copy with their own accounts and keys.</li><li>The demo login extends Decision 1: the owner still logs in as before, and the demo viewer can never see real connectors or messages, or approve and send.</li></ul> |
 
 ## Decisions (answers to the §12 questions)
 
@@ -38,13 +39,14 @@
 | 10 | Gmail: inbox minus Promotions/Social, 48h backfill, reply to sender only. |
 | 11 | **Singapore** for Neon (AWS ap-southeast-1), Render (Singapore) and Vercel functions (`sin1`). `OWNER_TIMEZONE=Asia/Kolkata`. |
 | 12 | Owner: `AGENT_OWNER_NAME="Dhruv Sonkusare"`, `AGENT_OWNER_CONTEXT="Python backend developer"`. VIP list comes later. |
+| 13 | **Option A (2026-11-16):** add Step 7, self-hosting and a public read-only demo (R14). Hubline stays single-user per deployment; no multi-tenant sign-up. |
 
 **Note on R3/R10 and Neon sleep:** Neon Free suspends compute only after 5 minutes with no queries.
 - **Production (Render Free):** both loops are off (`ENABLE_SCHEDULER=false`, `ENABLE_AGENT_WORKER=false`), so nothing queries the DB between ticks and requests.
 - **Local dev:** the loops can stay on. Idle sleeps default to 600s (above 300s), so an idle app still lets the DB sleep.
 - **Responsiveness:** API actions (toggle, sync, sample, webhook) either wake the loops through an in-process event or, with the loops off, run one pass in the background. Long idle sleeps therefore never make the UI feel slow.
 
-> Sections 1–12 below are the original plan. Where they conflict with R1–R13 or the decisions above, R1–R13 and the decisions win. §6 (LLM), §8 (deployment), §9 Step 4 and §11 have been rewritten for R6–R10.
+> Sections 1–12 below are the original plan. Where they conflict with R1–R14 or the decisions above, R1–R14 and the decisions win. §6 (LLM), §8 (deployment), §9 Step 4 and §11 have been rewritten for R6–R10.
 
 ## Context
 
@@ -909,7 +911,7 @@ With 24/7 ticks (48/day) the total is ≈ 56. With hourly ticks it is ≈ 33. If
 
 ---
 
-## 9. Build order (6 steps)
+## 9. Build order (7 steps)
 
 Every step ends with:
 - runnable code
@@ -1049,6 +1051,38 @@ Then I stop and wait for you.
   - The full suite is green.
   - The demo script has been rehearsed against production.
 - **You set up by hand:** an Entra ID app registration (multi-tenant or your tenant) with the redirect URI, permissions and client secret. Optionally, download your LinkedIn/X data exports.
+
+
+### Step 7 — Self-hosting and public demo (R14, planned, not built)
+- **Goal:** a first-timer can run their own Hubline on free tiers, and visitors can try a public read-only demo without ever seeing real data. **Hubline stays single-user per deployment**: no multi-tenant sign-up.
+- **Scope:**
+  1. **"Deploy to Render" button** in the README, using the existing `render.yaml` (Blueprint). Secrets stay `sync: false` or `generateValue`, so the button never ships a value.
+  2. **`docs/self-hosting.md`:** a step-by-step guide for a first-timer, all on free tiers:
+     - Neon (project, Singapore or the nearest region, connection string)
+     - a Groq API key
+     - a Google Cloud project (Gmail API, consent screen in Testing, test user, Web client, redirect URI)
+     - a Slack app from `docs/setup/slack-app-manifest.yaml`
+     - Render (the button) and Vercel (root `frontend/`, `sin1` or the nearest region)
+     - the env vars for each, and the order to set them in
+  3. **Public read-only demo login:**
+     - A second login on the login page ("Try the demo"), with no password, or one published in the README.
+     - It only ever shows `is_demo=true` rows and the demo connector. Real connectors, real messages and settings are never returned.
+     - Approve/send, edit, redraft, dismiss, connect, disconnect and the connector toggles are disabled.
+     - **Enforced on the backend, not only hidden in the UI.** The session carries a `demo` role. The Next.js server calls the backend with a separate read-only token that the backend scopes to `is_demo` rows and safe methods. The owner token is never used for a demo session.
+     - Demo viewers must not break $0: no LLM calls from their actions, and they shouldn't keep Neon awake more than about the current tick budget (R10).
+  4. **Setup check:** tells a new self-hoster which env vars are missing or invalid, and what each one is for. It uses the existing `missing_env` logic plus core settings. It's available as a CLI (`uv run python -m scripts.check_setup`) and as a card on the dashboard for the owner only. It never prints values.
+  5. **Safe to publish:**
+     - no secrets anywhere in the git history (scanned before the repo goes public)
+     - an MIT `LICENSE`
+     - a README with screenshots
+- **Files (expected):** `README.md`, `docs/self-hosting.md`, `LICENSE`, `render.yaml` (if the button needs tweaks), `backend/scripts/check_setup.py`, demo-role auth in `backend/app/api/deps.py` and `frontend/auth.ts`, plus read-only UI states and their tests.
+- **Done when:**
+  - The README button opens a prefilled Render Blueprint.
+  - Following `docs/self-hosting.md` from scratch gives a working deployment.
+  - A demo session sees only `is_demo` data, and every mutating backend call with the demo token returns 403 (tested).
+  - The setup check lists exactly the missing names.
+  - The history scan is clean.
+- **Depends on:** GitHub being back (R11) for the button and a public repo. Step 4 deployed.
 
 ---
 

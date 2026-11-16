@@ -2,7 +2,7 @@
 
 Hubline is a single-user unified inbox. Connector plug-ins ingest messages from Gmail, Slack, Teams, LinkedIn and X into Postgres. A LangGraph agent scores priority (1–5), summarises each message and drafts a reply. A human approves every reply on a Next.js dashboard, and the reply goes out through the original app.
 
-The full approved plan is **[docs/PLAN.md](docs/PLAN.md)**. Its "Revisions" (R1–R13) and "Decisions" tables override the original sections.
+The full approved plan is **[docs/PLAN.md](docs/PLAN.md)**. Its "Revisions" (R1–R14) and "Decisions" tables override the original sections.
 
 > **HARD REQUIREMENT: the whole project runs at $0.**
 > - Only free tiers: Render Free, Vercel Hobby, Neon Free, Groq/Gemini free LLM tiers, GitHub Actions cron on the public repo.
@@ -13,8 +13,14 @@ The full approved plan is **[docs/PLAN.md](docs/PLAN.md)**. Its "Revisions" (R1�
 
 ## Build process (MANDATORY)
 
-- We build in **6 steps** (plan §9). Work on **one step only**, the one the user asked for.
+- We build in **7 steps** (plan §9). Work on **one step only**, the one the user asked for.
 - **Step order (R13):** Step 5 (Slack + Gmail) is built and run locally before Step 4 deploys; Step 4 waits for GitHub.
+- **Step 7 (R14, planned, not built):** self-hosting and a public read-only demo.
+  - A Deploy to Render button and `docs/self-hosting.md` (all free tiers).
+  - A demo login that sees only `is_demo` data, with every mutation blocked **on the backend**.
+  - A setup check that names missing env vars.
+  - A publish-safe repo: no secrets in history, an MIT LICENSE, README screenshots.
+  - **Hubline stays single-user per deployment:** never add multi-tenant sign-up or a users table.
 - Every step must end with: runnable code, **all tests and checks passing**, an updated README, and `reports/step-<N>-report.md` written with the template below.
 - **After writing the report, STOP and wait for the user.** Do not start the next step, even partially.
 - Any deviation from the plan goes in the report under "Deviations from the plan". Don't silently diverge.

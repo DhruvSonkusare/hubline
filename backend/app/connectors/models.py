@@ -58,6 +58,7 @@ class WebhookResponse:
     status: int = 200
     body: bytes = b""
     content_type: str = "text/plain"
+    headers: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass

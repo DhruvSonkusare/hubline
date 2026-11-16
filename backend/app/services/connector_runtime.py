@@ -4,27 +4,41 @@ and building a Connector instance with its injected context.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 import structlog
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.connectors import registry
 from app.connectors.base import AuthType, Connector, ConnectorContext, ConnectorDescriptor
 from app.models import ConnectorAccount, SyncState
+from app.services.credentials import CredentialsUnavailableError, load_credentials, saver
 
 log = structlog.get_logger(__name__)
 
 
+def _is_set(value: object) -> bool:
+    if isinstance(value, SecretStr):
+        return bool(value.get_secret_value().strip())
+    if isinstance(value, str):
+        return bool(value.strip())
+    return value is not None
+
+
 def missing_settings(desc: ConnectorDescriptor, settings: Settings) -> list[str]:
     """Env var names (upper-case) required by the connector but empty/unset."""
-    return [name.upper() for name in desc.required_settings if not getattr(settings, name, None)]
+    return [
+        name.upper()
+        for name in desc.required_settings
+        if not _is_set(getattr(settings, name, None))
+    ]
 
 
 def allowed_by_env(key: str, settings: Settings) -> bool:
@@ -101,7 +115,12 @@ def parse_connector_settings(
 
 
 def build_connector(
-    account: ConnectorAccount, settings: Settings, http: httpx.AsyncClient
+    account: ConnectorAccount,
+    settings: Settings,
+    http: httpx.AsyncClient,
+    *,
+    credentials: dict[str, Any] | None = None,
+    save_credentials: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> Connector:
     cls = registry.get(account.source)
     desc = cls.describe()
@@ -113,5 +132,34 @@ def build_connector(
         http=http,
         app_settings=settings,
         log=structlog.get_logger(f"connector.{account.source}"),
+        credentials=credentials,
     )
+    if save_credentials is not None:
+        ctx.save_credentials = save_credentials
     return cls(ctx)
+
+
+async def open_connector(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    account: ConnectorAccount,
+    settings: Settings,
+    http: httpx.AsyncClient,
+) -> Connector:
+    """build_connector() with decrypted credentials (loaded in a short session) and a
+    save_credentials callback that persists refreshed tokens in its own transaction.
+
+    Raises CredentialsUnavailableError when an app that needs credentials has none usable.
+    """
+    if registry.get(account.source).describe().auth_type is AuthType.NONE:
+        return build_connector(account, settings, http)
+    async with sessionmaker() as session:
+        credentials = await load_credentials(session, account.id, settings)
+    if credentials is None:
+        raise CredentialsUnavailableError(f"{account.source} has no stored credentials")
+    return build_connector(
+        account,
+        settings,
+        http,
+        credentials=credentials,
+        save_credentials=saver(sessionmaker, account.id, settings),
+    )

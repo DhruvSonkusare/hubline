@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class TokenFieldOut(BaseModel):
+    name: str
+    label: str
+    placeholder: str
+    help: str
 
 
 class ConnectorOut(BaseModel):
@@ -27,6 +34,9 @@ class ConnectorOut(BaseModel):
     last_error: str | None
     settings: dict[str, Any]
     settings_schema: dict[str, Any] | None
+    # how the dashboard connects it: "oauth" (redirect), "token" (paste form) or "none"
+    connect_method: Literal["oauth", "token", "none"]
+    token_fields: list[TokenFieldOut]
 
 
 class ConnectorPatch(BaseModel):
@@ -54,3 +64,15 @@ class SampleOut(BaseModel):
 
 class ScenarioList(BaseModel):
     scenarios: list[str]
+
+
+class CredentialsIn(BaseModel):
+    """Write-only: pasted values are validated with the app, encrypted, and never returned."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    fields: dict[str, str] = Field(max_length=10)
+
+
+class OAuthStartOut(BaseModel):
+    authorize_url: str

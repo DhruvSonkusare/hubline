@@ -21,6 +21,28 @@ _SECRET_KEY = re.compile(
 )
 
 
+# Query parameters whose values never reach the access log (OAuth callback code/state, tokens).
+_SECRET_QUERY = re.compile(
+    r"([?&](?:code|state|token|access_token|refresh_token|id_token|secret|password|key)=)[^&#\s]*",
+    re.IGNORECASE,
+)
+
+
+def redact_query(path: str) -> str:
+    """`/oauth/gmail/callback?code=abc&state=xyz` -> `...?code=[REDACTED]&state=[REDACTED]`."""
+    return _SECRET_QUERY.sub(lambda m: m.group(1) + REDACTED, path)
+
+
+class AccessLogRedactor(logging.Filter):
+    """uvicorn.access logs `(client, method, full_path, http_version, status)`; redact the path."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            record.args = (*args[:2], redact_query(args[2]), *args[3:])
+        return True
+
+
 def _redact(value: Any) -> Any:
     if isinstance(value, dict):
         return {
@@ -65,6 +87,9 @@ def configure_logging(level: str = "INFO", fmt: str = "json") -> None:
         logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
         cache_logger_on_first_use=False,
     )
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, AccessLogRedactor) for f in access.filters):
+        access.addFilter(AccessLogRedactor())
 
 
 async def request_id_middleware(

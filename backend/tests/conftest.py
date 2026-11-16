@@ -40,6 +40,8 @@ TEST_DATABASE_URL = os.environ.get(
 )
 TEST_TOKEN = "test-token-0123456789abcdef0123456789abcdef"
 TABLES = (
+    "oauth_states",
+    "connector_credentials",
     "outbound_replies",
     "agent_jobs",
     "drafts",
@@ -231,3 +233,42 @@ def _fresh_rate_limiters() -> Iterator[None]:
     reset_limiters()
     yield
     reset_limiters()
+
+
+# ----------------------------------------------------------------------------- real connectors
+
+TEST_FERNET_KEY = "x3tqa0lXeFdh7k1t8qLRmoKbZr3PHtqI0zWJpWsYfQ8="  # test-only key
+GOOGLE_CLIENT_ID = "1234-test.apps.googleusercontent.com"
+GOOGLE_CLIENT_SECRET = "GOCSPX-test-secret"
+
+
+def make_connector_settings(**overrides: Any) -> Settings:
+    """Settings with Slack, Gmail and the credential key configured (all fake values)."""
+    from tests.connectors.payloads import SIGNING_SECRET
+
+    values: dict[str, Any] = {
+        "credentials_encryption_key": TEST_FERNET_KEY,
+        "slack_signing_secret": SIGNING_SECRET,
+        "google_client_id": GOOGLE_CLIENT_ID,
+        "google_client_secret": GOOGLE_CLIENT_SECRET,
+        "public_base_url": "http://localhost:8000",
+        "frontend_url": "http://localhost:3000",
+    }
+    values.update(overrides)
+    return make_settings(**values)
+
+
+@pytest.fixture
+async def connector_client(engine: AsyncEngine) -> AsyncIterator[httpx.AsyncClient]:
+    """App client with real connectors configured; outbound HTTP must be mocked with respx."""
+    app = create_app(make_connector_settings())
+    async with (
+        LifespanManager(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {TEST_TOKEN}"},
+        ) as client,
+    ):
+        client.app = app  # type: ignore[attr-defined]
+        yield client

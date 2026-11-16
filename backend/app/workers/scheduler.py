@@ -26,7 +26,8 @@ from app.config import Settings
 from app.connectors import registry
 from app.connectors.base import AuthExpiredError, RateLimitedError
 from app.models import ConnectorAccount, SyncState
-from app.services.connector_runtime import build_connector, pollable_sources
+from app.services.connector_runtime import open_connector, pollable_sources
+from app.services.credentials import CredentialsUnavailableError
 from app.services.ingest import ingest_messages
 from app.services.jobs import promote_newest_backfill
 from app.workers.supervisor import sleep_or_wake
@@ -150,7 +151,7 @@ class Scheduler:
         backfill = claim.cursor is None
         backfilled: list[uuid.UUID] = []
         try:
-            connector = build_connector(account, self.settings, self.http)
+            connector = await open_connector(self.sessionmaker, account, self.settings, self.http)
             for _page in range(self.settings.max_pages_per_poll):
                 result = await asyncio.wait_for(
                     connector.fetch_new(cursor), timeout=self.settings.poll_timeout_s
@@ -177,7 +178,7 @@ class Scheduler:
                     self.on_new_jobs()
                 if not result.has_more:
                     break
-        except AuthExpiredError as exc:
+        except (AuthExpiredError, CredentialsUnavailableError) as exc:
             plog.warning("poll_auth_expired", error=str(exc))
             await self._record_failure(claim, interval, str(exc), needs_reauth=True)
         except RateLimitedError as exc:

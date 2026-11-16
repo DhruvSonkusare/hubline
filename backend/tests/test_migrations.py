@@ -28,7 +28,7 @@ async def test_models_match_migrations(engine: AsyncEngine) -> None:
 
 
 async def test_tables_so_far(engine: AsyncEngine) -> None:
-    """Plan R1: tables arrive step by step (Steps 1, 2 and 3 so far)."""
+    """Plan R1: tables arrive step by step (Steps 1, 2, 3 and 5 so far)."""
     async with engine.connect() as conn:
         rows = await conn.execute(
             text("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY 1")
@@ -38,8 +38,10 @@ async def test_tables_so_far(engine: AsyncEngine) -> None:
         "agent_jobs",
         "alembic_version",
         "connector_accounts",
+        "connector_credentials",
         "drafts",
         "messages",
+        "oauth_states",
         "outbound_replies",
         "sync_state",
         "threads",

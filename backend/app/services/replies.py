@@ -26,10 +26,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.connectors import registry
+from app.connectors.base import AuthExpiredError
 from app.connectors.models import NormalizedMessage, ReplyContext, Sender
 from app.errors import ApiError, not_found
 from app.models import ConnectorAccount, Draft, Message, OutboundReply
-from app.services.connector_runtime import build_connector
+from app.services.connector_runtime import open_connector
+from app.services.credentials import CredentialsUnavailableError
 from app.services.ingest import ingest_messages
 
 log = structlog.get_logger(__name__)
@@ -194,11 +196,11 @@ async def approve_and_send(
             reply_meta=dict(msg.reply_meta or {}),
         )
         source, thread, is_demo = msg.source, msg.external_thread_id, msg.is_demo
-        me = account.account_identity or "me"
+        me = next(iter(account.self_ids or ()), None) or account.account_identity or "me"
 
     # ---- send, no transaction open
     try:
-        connector = build_connector(account, settings, http)
+        connector = await open_connector(sessionmaker, account, settings, http)
         result = await asyncio.wait_for(
             connector.send(thread, body, reply_to=reply_to), timeout=SEND_TIMEOUT_S
         )
@@ -211,6 +213,17 @@ async def approve_and_send(
                 .where(OutboundReply.id == reply_id)
                 .values(status="failed", error=error)
             )
+            if isinstance(exc, AuthExpiredError | CredentialsUnavailableError):
+                await session.execute(
+                    update(ConnectorAccount)
+                    .where(ConnectorAccount.id == account.id)
+                    .values(
+                        status="needs_reauth",
+                        last_error=error,
+                        last_error_at=func.now(),
+                        updated_at=func.now(),
+                    )
+                )
         raise ApiError(
             502, "upstream_error", f"sending failed: {error}", {"reply_id": str(reply_id)}
         ) from exc

@@ -33,6 +33,9 @@ body {
 @utility btn-ghost {
   @apply btn text-slate-600 hover:bg-slate-100 hover:text-slate-900;
 }
+@utility btn-danger {
+  @apply btn bg-red-600 text-white hover:bg-red-700;
+}
 @utility card {
   @apply rounded-xl border border-slate-200 bg-white shadow-sm;
 }

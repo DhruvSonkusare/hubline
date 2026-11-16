@@ -12,7 +12,7 @@ One inbox for every alert. Hubline pulls messages from Gmail, Slack, Microsoft T
 | LLM | Groq free tier (Gemini free tier optional) |
 | Cron | GitHub Actions on this public repo |
 
-> **Status: Step 3 of 6 complete (dashboard, local).** The backend and the Next.js dashboard run locally. You log in with a password, see a prioritised feed, create demo messages, and review the agent's summary, draft and open questions. You can approve and send (into a demo outbox), copy, redraft, dismiss or triage. The deploy files are prepared, but deploying waits for GitHub (on hold). Slack + Gmail (Step 5) therefore run **locally first**; see [reports/step-5-plan.md](reports/step-5-plan.md). See [docs/PLAN.md](docs/PLAN.md) and the [screenshots](reports/step-3-screenshots/).
+> **Status: Step 5 of 7 built, locally (Slack + Gmail live).** The backend and dashboard run on your PC. Real Slack DMs, group DMs and @mentions arrive within a second through a cloudflared tunnel. Gmail inbox mail arrives within about 60 s. Groq triages each message and drafts replies. Slack replies you approve post into the right DM or thread; the live Gmail reply is still to be confirmed (see [reports/step-5-report.md](reports/step-5-report.md)). Deploying (Step 4) waits for GitHub (on hold). See [docs/PLAN.md](docs/PLAN.md) and the [Step 3 screenshots](reports/step-3-screenshots/).
 
 | Step | What it adds | Status |
 |---|---|---|
@@ -20,8 +20,9 @@ One inbox for every alert. Hubline pulls messages from Gmail, Slack, Microsoft T
 | 2 | LangGraph agent worker: priority, summary, drafts | ✅ done |
 | 3 | Full API + Next.js dashboard (local) | ✅ done |
 | 4 | Deploy at $0: Vercel Hobby + Render Free + Neon Free (Singapore) + tick cron | 🧰 files prepared; deploy waits for GitHub |
-| 5 | Slack + Gmail live (locally first: cloudflared tunnel + localhost OAuth) | 📝 planned, next |
+| 5 | Slack + Gmail live (locally first: cloudflared tunnel + localhost OAuth) | ✅ built; Slack verified live, Gmail reply still to confirm |
 | 6 | Teams, LinkedIn/X (read-only), hardening, demo script | ⏳ |
+| 7 | Self-hosting (Deploy to Render button, guide, setup check), public read-only demo, publish-safe repo | 📝 planned (R14) |
 
 ## How it works
 
@@ -142,6 +143,24 @@ npm run dev                  # http://localhost:3000, with the backend running o
 
 Interactive API docs are at http://localhost:8000/docs (disabled in production).
 
+### Live connectors: Slack and Gmail (local)
+
+Both connect from the dashboard's **Connectors** page. Their tokens are stored encrypted with `CREDENTIALS_ENCRYPTION_KEY` (`uv run python -m scripts.gen_keys` prints one) and never returned or logged.
+
+- **Slack:** [docs/setup/slack.md](docs/setup/slack.md), using the app manifest in [docs/setup/slack-app-manifest.yaml](docs/setup/slack-app-manifest.yaml).
+  - It reads DMs, group DMs and @mentions of you, and replies **as you** with a user token. You paste the `xoxp-` token on the Connectors page.
+  - Events reach your PC through a free cloudflared quick tunnel:
+    ```bash
+    uv run python -m scripts.dev_tunnel     # prints the Request URL ending in /webhooks/slack
+    ```
+    The URL changes every run, so paste it into the Slack app's **Event Subscriptions** each session.
+  - A safety-net poll every 5 minutes makes at most one `conversations.history` call, to stay under Slack's non-Marketplace limit of about 1 per minute.
+- **Gmail:** [docs/setup/gmail.md](docs/setup/gmail.md).
+  - OAuth with PKCE to `http://localhost:8000/oauth/gmail/callback`, polling every 60 s with `history.list`.
+  - Replies go to `Reply-To`, else `From`, in the same thread.
+  - In Google's Testing mode the login lasts **7 days**. Click **Reconnect Gmail** before then.
+- **Disconnect** revokes the token at the provider and deletes it locally. Message history stays.
+
 ## Tests and checks
 
 ```bash
@@ -181,6 +200,11 @@ All `/api/*` routes need `Authorization: Bearer <BACKEND_API_TOKENS entry>`. Onl
 | POST | `/api/messages/{id}/dismiss` / `reopen` | Status changes. |
 | GET | `/api/connectors/{key}/scenarios` | Scenario names for New demo message. |
 | POST | `/api/connectors/{key}/sample` | Generate one message now. Only for connectors with the `sample` capability, i.e. demo. Optional body `{"scenario": "<name>"}`. The agent triages it within seconds. |
+| POST | `/api/connectors/{key}/credentials` | `{"fields": {...}}` for token connectors (Slack: `{"token": "xoxp-…"}`). Checked live, stored encrypted, never returned. |
+| POST | `/api/connectors/{key}/oauth/start` | Returns `{authorize_url}` for OAuth connectors (Gmail). Single-use state with PKCE, valid 10 minutes. |
+| POST | `/api/connectors/{key}/disconnect` | Best-effort revoke at the provider, deletes the credentials, switches the connector off. History stays. |
+| GET | `/oauth/{key}/callback` | Public. Consumes the state, exchanges the code and redirects to the Connectors page with `?connected=` or `?error=`. |
+| POST | `/webhooks/{key}` | Public, verified by the connector (Slack: v0 HMAC signature, ±5 min). Bad signature → 401. |
 | POST | `/internal/tick` | **Cron endpoint**, header `X-Tick-Secret: $TICK_SECRET`. Runs one scheduler pass, then drains agent jobs for at most `TICK_BUDGET_S` (60s). `?wait=true` returns `{polled, agent_jobs, elapsed_s, stopped}`; otherwise it answers `202` and runs in the background. Returns 404 unless `TICK_SECRET` is set. |
 
 **Free cron:** [.github/workflows/tick.yml](.github/workflows/tick.yml) calls the tick every 30 minutes from 06:30 to 23:00 IST. It stays inert until the repository secrets `TICK_URL` and `TICK_SECRET` exist.
@@ -216,6 +240,11 @@ Every setting is an environment variable. Locally they live in `backend/.env`; s
 | `AGENT_MAX_TOKENS_PER_DAY` | `180000` | Rolling 24 h token budget: 90% of Groq's free 200K tokens/day. `0` turns it off. |
 | `AGENT_CONCURRENCY` | `1` | Jobs processed in parallel; 1 fits the 8K tokens/min free limit. |
 | `AGENT_RETRY_DELAYS_S` | `30,120,600` | Waits between retries. After 3 attempts the message shows `agent_status=failed`. |
+| `PUBLIC_BASE_URL` / `FRONTEND_URL` | `http://localhost:8000` / `http://localhost:3000` | The backend's own URL (OAuth redirect URIs are built from it; keep it localhost locally, never the tunnel) and where OAuth callbacks send you back. |
+| `CREDENTIALS_ENCRYPTION_KEY` | unset | Fernet key for connector tokens. Required by Slack and Gmail. Losing it means reconnecting. |
+| `SLACK_SIGNING_SECRET` | unset | Slack app → Basic Information → Signing Secret. |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | unset | Google Cloud Web OAuth client for Gmail. |
+| `OAUTH_STATE_TTL_S` | `600` | How long a Connect link stays valid. |
 | `AGENT_OWNER_NAME` / `AGENT_OWNER_CONTEXT` / `AGENT_VIP_SENDERS` | Dhruv Sonkusare / Python backend developer / empty | Who the agent works for. VIP senders get higher priority. |
 
 ## Deploy ($0)
@@ -244,7 +273,7 @@ docker build -t hubline-api:local backend    # then see "Test the image locally"
 render.yaml Render Blueprint for the backend (Free, Singapore)
 backend/    FastAPI app, connectors, workers, Alembic migrations, tests (uv project)
 frontend/   Next.js dashboard (App Router, Tailwind, Auth.js; Playwright e2e)
-docs/       PLAN.md (approved plan), setup guides (Steps 4–6)
+docs/       PLAN.md (approved plan), setup guides (deploy, Slack, Gmail)
 reports/    step-<N>-report.md after every build step
 ```
 

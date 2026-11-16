@@ -96,3 +96,30 @@ export async function syncConnector(key: string) {
 export async function saveConnectorSettings(key: string, settings: Record<string, unknown>) {
   return guarded(() => api.patchConnector(key, { settings }));
 }
+
+// ---------------------------------------------------------------- connecting apps (Step 5)
+
+/** Paste-a-token connectors (Slack). The value goes straight to the backend, which checks it
+ * with the app and stores it encrypted; it is never sent back to the browser. */
+export async function connectWithToken(key: string, fields: Record<string, string>) {
+  return guarded(async () => {
+    const connector = await api.connectWithToken(key, fields);
+    return { status: connector.status, account_identity: connector.account_identity };
+  });
+}
+
+/** OAuth connectors (Gmail): returns the provider's consent URL for the browser to open. */
+export async function startOAuth(key: string) {
+  return guarded(async () => {
+    const { authorize_url } = await api.oauthStart(key);
+    if (!/^https:\/\//.test(authorize_url)) throw new Error("unexpected authorize URL");
+    return { authorize_url };
+  });
+}
+
+export async function disconnectConnector(key: string) {
+  return guarded(async () => {
+    const connector = await api.disconnect(key);
+    return { status: connector.status };
+  });
+}

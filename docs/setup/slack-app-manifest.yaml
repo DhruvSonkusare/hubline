@@ -1,0 +1,28 @@
+# Slack app manifest for Hubline ("Hubline Dev" = the local app; a production app later uses the
+# same manifest with another name). User scopes only: replies post AS YOU, no bot user.
+#
+# Event subscriptions are deliberately absent: Slack requires a verified Request URL before it
+# accepts them, and locally that URL is a cloudflared tunnel that changes every run. Add the four
+# user events (message.im, message.mpim, message.channels, message.groups) on the Event
+# Subscriptions page during the tunnel step - see docs/setup/slack.md.
+display_information:
+  name: Hubline Dev
+  description: Personal unified inbox. Reads your DMs and mentions; posts only replies you approve.
+  background_color: "#1f2937"
+oauth_config:
+  scopes:
+    user:
+      - im:history        # read 1:1 DMs
+      - im:read
+      - mpim:history      # read group DMs
+      - mpim:read
+      - channels:history  # read public channels you are in (only @mentions of you are kept)
+      - channels:read
+      - groups:history    # read private channels you are in (only @mentions of you are kept)
+      - groups:read
+      - users:read        # show sender names
+      - chat:write        # post the replies you approve, as you
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

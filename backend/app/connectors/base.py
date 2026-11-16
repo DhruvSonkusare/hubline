@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -127,6 +127,78 @@ class Connector(ABC):
     async def maintain(self) -> None:  # noqa: B027 - optional hook, intentionally empty
         """Optional periodic hook (e.g. renew a webhook subscription)."""
 
+    async def revoke(self) -> None:  # noqa: B027 - optional hook, intentionally empty
+        """Optional: revoke ctx.credentials at the provider (best effort, on disconnect)."""
+
+    @classmethod
+    def connect_method(cls) -> str:
+        """How the dashboard connects this app: "oauth", "token" or "none"."""
+        if issubclass(cls, OAuthConnectMixin):
+            return "oauth"
+        if issubclass(cls, TokenConnectMixin):
+            return "token"
+        return "none"
+
+
+# ---------------------------------------------------------------- connecting (Step 5)
+
+
+@dataclass(frozen=True)
+class ConnectResult:
+    """What a successful connect yields; the core encrypts `credentials` and stores the rest."""
+
+    credentials: dict[str, Any]
+    account_identity: str
+    self_ids: list[str]
+    scopes: list[str] = field(default_factory=list)
+    access_expires_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class TokenField:
+    """One input on the dashboard's "paste token" form. Values are write-only."""
+
+    name: str
+    label: str
+    placeholder: str = ""
+    help: str = ""
+
+
+class TokenConnectMixin(ABC):
+    """Connect by pasting a token (e.g. a Slack user token from the app's install page)."""
+
+    token_fields: ClassVar[tuple[TokenField, ...]]
+
+    @classmethod
+    @abstractmethod
+    async def connect_with_token(
+        cls, fields: Mapping[str, str], *, http: httpx.AsyncClient, app_settings: Settings
+    ) -> ConnectResult:
+        """Validate the pasted values live (raise ConnectError) and return what to store."""
+
+
+class OAuthConnectMixin(ABC):
+    """OAuth 2 authorization-code flow with PKCE; the core owns state and the callback route."""
+
+    @classmethod
+    @abstractmethod
+    def authorize_url(
+        cls, *, state: str, code_challenge: str, redirect_uri: str, app_settings: Settings
+    ) -> str: ...
+
+    @classmethod
+    @abstractmethod
+    async def exchange_code(
+        cls,
+        *,
+        code: str,
+        code_verifier: str,
+        redirect_uri: str,
+        http: httpx.AsyncClient,
+        app_settings: Settings,
+    ) -> ConnectResult:
+        """Exchange the code server-side (raise ConnectError) and return what to store."""
+
 
 # ---------------------------------------------------------------- errors the core understands
 
@@ -159,3 +231,11 @@ class ReadOnlyConnectorError(ConnectorError):
 
 class WebhookVerificationError(ConnectorError):
     pass
+
+
+class ConnectError(ConnectorError):
+    """Connecting failed in a way the user can fix. `code` is a short slug shown in the UI."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code

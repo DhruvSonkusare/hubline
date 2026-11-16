@@ -146,6 +146,12 @@ export const api = {
     call<Schemas["SyncScheduled"]>(`/api/connectors/${id(key)}/sync`, { method: "POST" }),
   scenarios: (key: string) =>
     call<Schemas["ScenarioList"]>(`/api/connectors/${id(key)}/scenarios`),
+  connectWithToken: (key: string, fields: Record<string, string>) =>
+    call<Connector>(`/api/connectors/${id(key)}/credentials`, { method: "POST", body: { fields } }),
+  oauthStart: (key: string) =>
+    call<Schemas["OAuthStartOut"]>(`/api/connectors/${id(key)}/oauth/start`, { method: "POST" }),
+  disconnect: (key: string) =>
+    call<Connector>(`/api/connectors/${id(key)}/disconnect`, { method: "POST" }),
   sample: (key: string, scenario: string | null) =>
     call<Schemas["SampleOut"]>(`/api/connectors/${id(key)}/sample`, {
       method: "POST",

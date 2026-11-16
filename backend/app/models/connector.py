@@ -9,7 +9,9 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
+    LargeBinary,
     Text,
     Uuid,
     func,
@@ -74,3 +76,32 @@ class SyncState(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     account: Mapped[ConnectorAccount] = relationship(back_populates="sync_state", lazy="raise")
+
+
+class ConnectorCredential(Base):
+    """Encrypted third-party tokens, kept apart so ordinary queries never load them."""
+
+    __tablename__ = "connector_credentials"
+
+    connector_account_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("connector_accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
+    scopes: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
+    access_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class OAuthState(Base):
+    """Single-use OAuth state with its PKCE verifier (valid for OAUTH_STATE_TTL_S)."""
+
+    __tablename__ = "oauth_states"
+
+    state: Mapped[str] = mapped_column(Text, primary_key=True)
+    source: Mapped[str] = mapped_column(Text)
+    code_verifier: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (Index("ix_oauth_states_expires_at", "expires_at"),)

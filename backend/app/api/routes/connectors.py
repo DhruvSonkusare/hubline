@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_runtime, get_session
 from app.connectors import registry
-from app.connectors.base import Capability
+from app.connectors.base import Capability, TokenConnectMixin
 from app.errors import ApiError, not_found
 from app.models import ConnectorAccount, SyncState
 from app.runtime import Runtime
@@ -17,11 +17,15 @@ from app.schemas.common import ErrorBody
 from app.schemas.connectors import (
     ConnectorOut,
     ConnectorPatch,
+    CredentialsIn,
+    OAuthStartOut,
     SampleIn,
     SampleOut,
     ScenarioList,
     SyncScheduled,
+    TokenFieldOut,
 )
+from app.services import connect
 from app.services.connector_runtime import allowed_by_env, build_connector, missing_settings
 from app.services.ingest import ingest_messages
 from app.services.jobs import PRIORITY_USER
@@ -35,6 +39,12 @@ _ERRORS: dict[int | str, dict[str, object]] = {
     409: {"model": ErrorBody},
     422: {"model": ErrorBody},
 }
+_CONNECT_ERRORS: dict[int | str, dict[str, object]] = {
+    **_ERRORS,
+    429: {"model": ErrorBody},
+    502: {"model": ErrorBody},
+    503: {"model": ErrorBody},
+}
 
 
 def _runner(runtime: Runtime) -> WorkRunner:
@@ -43,7 +53,8 @@ def _runner(runtime: Runtime) -> WorkRunner:
 
 
 def _to_out(account: ConnectorAccount, state: SyncState | None, runtime: Runtime) -> ConnectorOut:
-    desc = registry.get(account.source).describe()
+    cls = registry.get(account.source)
+    desc = cls.describe()
     return ConnectorOut(
         key=desc.key,
         display_name=desc.display_name,
@@ -64,6 +75,11 @@ def _to_out(account: ConnectorAccount, state: SyncState | None, runtime: Runtime
         last_error=account.last_error,
         settings=account.settings or {},
         settings_schema=desc.settings_model.model_json_schema() if desc.settings_model else None,
+        connect_method=cls.connect_method(),
+        token_fields=[
+            TokenFieldOut(name=f.name, label=f.label, placeholder=f.placeholder, help=f.help)
+            for f in (cls.token_fields if issubclass(cls, TokenConnectMixin) else ())
+        ],
     )
 
 
@@ -222,3 +238,50 @@ async def list_scenarios(key: str) -> ScenarioList:
     if Capability.SAMPLE not in cls.describe().capabilities:
         raise ApiError(409, "not_supported", f"{key} cannot generate sample messages")
     return ScenarioList(scenarios=cls.sample_scenarios())
+
+
+# ----------------------------------------------------------------------------- connect (Step 5)
+
+
+@router.post("/{key}/credentials", response_model=ConnectorOut, responses=_CONNECT_ERRORS)
+async def connect_with_token(
+    key: str,
+    body: CredentialsIn,
+    session: AsyncSession = Depends(get_session),
+    runtime: Runtime = Depends(get_runtime),
+) -> ConnectorOut:
+    """Connect by pasting a token. It is checked with the app, stored encrypted, never returned."""
+    await _load(session, key)  # 404 for unknown connectors
+    await session.rollback()  # no transaction open across the token check
+    await connect.connect_with_token(
+        runtime.sessionmaker, runtime.settings, runtime.http, key, body.fields
+    )
+    account, state = await _load(session, key)
+    if account.enabled:
+        _runner(runtime).kick_scheduler()
+    return _to_out(account, state, runtime)
+
+
+@router.post("/{key}/oauth/start", response_model=OAuthStartOut, responses=_CONNECT_ERRORS)
+async def oauth_start(
+    key: str,
+    session: AsyncSession = Depends(get_session),
+    runtime: Runtime = Depends(get_runtime),
+) -> OAuthStartOut:
+    """The URL to send the browser to. The provider redirects back to /oauth/{key}/callback."""
+    await _load(session, key)
+    return OAuthStartOut(authorize_url=await connect.start_oauth(session, runtime.settings, key))
+
+
+@router.post("/{key}/disconnect", response_model=ConnectorOut, responses=_ERRORS)
+async def disconnect_connector(
+    key: str,
+    session: AsyncSession = Depends(get_session),
+    runtime: Runtime = Depends(get_runtime),
+) -> ConnectorOut:
+    """Revoke (best effort) and delete the stored tokens; turns the connector off. History stays."""
+    await _load(session, key)
+    await session.rollback()
+    await connect.disconnect(runtime.sessionmaker, runtime.settings, runtime.http, key)
+    account, state = await _load(session, key)
+    return _to_out(account, state, runtime)
